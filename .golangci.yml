@@ -4,3 +4,4 @@ linters:
   exclusions:
     paths:
       - examples
+      - internal/gen

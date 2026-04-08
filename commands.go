@@ -1,15 +1,15 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strconv"
 	"strings"
 	"time"
+
+	"connectrpc.com/connect"
+
+	processpb "github.com/matiasinsaurralde/go-e2b/internal/gen/envd/process"
+	"github.com/matiasinsaurralde/go-e2b/internal/gen/envd/process/processconnect"
 )
 
 // CommandResult holds the output of a completed command.
@@ -72,41 +72,6 @@ func WithTimeout(d time.Duration) RunOption {
 	}
 }
 
-type processRequest struct {
-	Process processSpec `json:"process"`
-}
-
-type processSpec struct {
-	Cmd  string            `json:"cmd"`
-	Args []string          `json:"args,omitempty"`
-	Envs map[string]string `json:"envs,omitempty"`
-	Cwd  string            `json:"cwd,omitempty"`
-}
-
-type streamMessage struct {
-	Event *processEvent `json:"event,omitempty"`
-}
-
-type processEvent struct {
-	Start *startEvent `json:"start,omitempty"`
-	Data  *dataEvent  `json:"data,omitempty"`
-	End   *endEvent   `json:"end,omitempty"`
-}
-
-type startEvent struct {
-	Pid int `json:"pid,omitempty"`
-}
-
-type dataEvent struct {
-	Stdout []byte `json:"stdout,omitempty"`
-	Stderr []byte `json:"stderr,omitempty"`
-}
-
-type endEvent struct {
-	ExitCode int  `json:"exitCode,omitempty"`
-	Exited   bool `json:"exited,omitempty"`
-}
-
 // Run executes a command in the sandbox and returns the result.
 // It blocks until the command completes.
 func (c *CommandService) Run(cmd string, args []string, opts ...RunOption) (*CommandResult, error) {
@@ -116,100 +81,61 @@ func (c *CommandService) Run(cmd string, args []string, opts ...RunOption) (*Com
 // RunWithContext executes a command in the sandbox using the provided context
 // for cancellation and deadline control.
 func (c *CommandService) RunWithContext(ctx context.Context, cmd string, args []string, opts ...RunOption) (*CommandResult, error) {
-	rc := &runConfig{
-		timeout: DefaultCommandTimeout,
-	}
+	rc := &runConfig{timeout: DefaultCommandTimeout}
 	for _, opt := range opts {
 		opt(rc)
 	}
 
-	spec := processSpec{
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	cfg := &processpb.ProcessConfig{
 		Cmd:  cmd,
 		Args: args,
 		Envs: rc.envVars,
-		Cwd:  rc.cwd,
+	}
+	if rc.cwd != "" {
+		cwd := rc.cwd
+		cfg.Cwd = &cwd
 	}
 
-	jsonBody, err := json.Marshal(processRequest{Process: spec})
-	if err != nil {
-		return nil, fmt.Errorf("e2b: marshal command request: %w", err)
-	}
-
-	envelope, err := connectEnvelope(jsonBody)
-	if err != nil {
-		return nil, fmt.Errorf("e2b: create envelope: %w", err)
-	}
-
-	url := c.sandbox.envdURL("/process.Process/Start")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envelope))
-	if err != nil {
-		return nil, fmt.Errorf("e2b: build command request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/connect+json")
-	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("X-Access-Token", c.sandbox.accessToken)
-	req.Header.Set("Connect-Timeout-Ms", strconv.FormatInt(rc.timeout.Milliseconds(), 10))
+	req := connect.NewRequest(&processpb.StartRequest{Process: cfg})
+	req.Header().Set("X-Access-Token", c.sandbox.accessToken)
 	if rc.user != "" {
-		req.Header.Set("User", rc.user)
+		req.Header().Set("User", rc.user)
 	}
 
-	resp, err := c.sandbox.httpClient.Do(req)
+	client := processconnect.NewProcessClient(c.sandbox.httpClient, c.sandbox.envdBaseURL())
+	stream, err := client.Start(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("e2b: send command request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+		return nil, fmt.Errorf("e2b: start process: %w", err)
 	}
 
-	return parseProcessStream(resp.Body)
-}
-
-// parseProcessStream reads Connect-framed JSON messages from a process
-// stream and assembles the command result.
-func parseProcessStream(r io.Reader) (*CommandResult, error) {
 	var stdoutBuf, stderrBuf strings.Builder
 	var exitCode int
 
-	for {
-		frame, err := readConnectFrame(r)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("e2b: read stream frame: %w", err)
-		}
-
-		if frame.isEndOfStream() {
-			if err := parseTrailerError(frame.Payload); err != nil {
-				return nil, err
-			}
-			break
-		}
-
-		var msg streamMessage
-		if err := json.Unmarshal(frame.Payload, &msg); err != nil {
-			return nil, fmt.Errorf("e2b: decode stream event: %w", err)
-		}
-
-		if msg.Event == nil {
+	for stream.Receive() {
+		event := stream.Msg().GetEvent()
+		if event == nil {
 			continue
 		}
-
-		if msg.Event.Data != nil {
-			if len(msg.Event.Data.Stdout) > 0 {
-				stdoutBuf.Write(msg.Event.Data.Stdout)
+		if data := event.GetData(); data != nil {
+			if b := data.GetStdout(); len(b) > 0 {
+				stdoutBuf.Write(b)
 			}
-			if len(msg.Event.Data.Stderr) > 0 {
-				stderrBuf.Write(msg.Event.Data.Stderr)
+			if b := data.GetStderr(); len(b) > 0 {
+				stderrBuf.Write(b)
 			}
 		}
-
-		if msg.Event.End != nil {
-			exitCode = msg.Event.End.ExitCode
+		if end := event.GetEnd(); end != nil {
+			exitCode = int(end.GetExitCode())
 		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, fmt.Errorf("e2b: process stream: %w", err)
 	}
 
 	return &CommandResult{

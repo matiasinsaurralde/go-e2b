@@ -371,14 +371,14 @@ func TestNewSandboxAPIKeyFromEnv(t *testing.T) {
 	}
 }
 
-func TestEnvdURL(t *testing.T) {
+func TestEnvdBaseURL(t *testing.T) {
 	sbx := &Sandbox{
 		ID:            "sbx-abc",
 		sandboxDomain: "e2b.app",
 	}
-	got := sbx.envdURL("/process.Process/Start")
-	want := "https://49983-sbx-abc.e2b.app/process.Process/Start"
+	got := sbx.envdBaseURL()
+	want := "https://49983-sbx-abc.e2b.app"
 	if got != want {
-		t.Errorf("envdURL = %q, want %q", got, want)
+		t.Errorf("envdBaseURL = %q, want %q", got, want)
 	}
 }

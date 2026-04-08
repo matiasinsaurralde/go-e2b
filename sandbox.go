@@ -141,9 +141,9 @@ func NewSandboxWithContext(ctx context.Context, cfg SandboxConfig) (*Sandbox, er
 	return sbx, nil
 }
 
-// envdURL returns the full URL for an envd endpoint path.
-func (s *Sandbox) envdURL(path string) string {
-	return fmt.Sprintf("https://%d-%s.%s%s", envdPort, s.ID, s.sandboxDomain, path)
+// envdBaseURL returns the base URL of the sandbox environment daemon.
+func (s *Sandbox) envdBaseURL() string {
+	return fmt.Sprintf("https://%d-%s.%s", envdPort, s.ID, s.sandboxDomain)
 }
 
 // Close destroys the sandbox, freeing all associated resources.
