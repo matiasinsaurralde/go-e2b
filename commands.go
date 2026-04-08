@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // CommandResult holds the output of a completed command.
@@ -39,7 +40,7 @@ type runConfig struct {
 	envVars map[string]string
 	cwd     string
 	user    string
-	timeout int
+	timeout time.Duration
 }
 
 // WithEnv sets environment variables for the command.
@@ -63,11 +64,11 @@ func WithUser(user string) RunOption {
 	}
 }
 
-// WithTimeout sets the command timeout in milliseconds.
-// Defaults to DefaultCommandTimeout (60000ms).
-func WithTimeout(ms int) RunOption {
+// WithTimeout sets the command timeout.
+// Defaults to DefaultCommandTimeout (60s).
+func WithTimeout(d time.Duration) RunOption {
 	return func(rc *runConfig) {
-		rc.timeout = ms
+		rc.timeout = d
 	}
 }
 
@@ -147,7 +148,7 @@ func (c *CommandService) RunWithContext(ctx context.Context, cmd string, args []
 	req.Header.Set("Content-Type", "application/connect+json")
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("X-Access-Token", c.sandbox.accessToken)
-	req.Header.Set("Connect-Timeout-Ms", strconv.Itoa(rc.timeout))
+	req.Header.Set("Connect-Timeout-Ms", strconv.FormatInt(rc.timeout.Milliseconds(), 10))
 	if rc.user != "" {
 		req.Header.Set("User", rc.user)
 	}

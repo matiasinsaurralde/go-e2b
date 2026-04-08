@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // --- Stream parsing tests ---
@@ -261,7 +262,7 @@ func TestRunWithOptions(t *testing.T) {
 		WithEnv(map[string]string{"FOO": "bar"}),
 		WithCwd("/tmp"),
 		WithUser("root"),
-		WithTimeout(5000),
+		WithTimeout(5*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

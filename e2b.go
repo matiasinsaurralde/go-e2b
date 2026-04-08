@@ -24,6 +24,7 @@ package e2b
 
 import (
 	"os"
+	"time"
 )
 
 const (
@@ -36,8 +37,8 @@ const (
 	// DefaultTimeout is the default sandbox lifetime in seconds.
 	DefaultTimeout = 300
 
-	// DefaultCommandTimeout is the default command execution timeout in milliseconds.
-	DefaultCommandTimeout = 60000
+	// DefaultCommandTimeout is the default command execution timeout.
+	DefaultCommandTimeout = 60 * time.Second
 
 	// envdPort is the port used by the environment daemon.
 	envdPort = 49983
