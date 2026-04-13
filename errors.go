@@ -38,3 +38,13 @@ type TimeoutError struct {
 func (e *TimeoutError) Error() string {
 	return fmt.Sprintf("e2b: timeout: %s", e.Message)
 }
+
+// FileNotFoundError is returned when the requested path does not exist in the sandbox.
+type FileNotFoundError struct {
+	Path string
+}
+
+// Error implements the error interface.
+func (e *FileNotFoundError) Error() string {
+	return fmt.Sprintf("e2b: file not found: %s", e.Path)
+}
