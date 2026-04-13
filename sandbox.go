@@ -44,6 +44,9 @@ type Sandbox struct {
 	// Commands provides command execution within the sandbox.
 	Commands *CommandService
 
+	// Filesystem provides file read and write operations within the sandbox.
+	Filesystem *FilesystemService
+
 	accessToken   string
 	apiKey        string
 	apiBaseURL    string
@@ -138,6 +141,7 @@ func NewSandboxWithContext(ctx context.Context, cfg SandboxConfig) (*Sandbox, er
 		httpClient:    httpClient,
 	}
 	sbx.Commands = newCommandService(sbx)
+	sbx.Filesystem = newFilesystemService(sbx)
 	return sbx, nil
 }
 
