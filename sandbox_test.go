@@ -382,3 +382,193 @@ func TestEnvdBaseURL(t *testing.T) {
 		t.Errorf("envdBaseURL = %q, want %q", got, want)
 	}
 }
+
+func TestInfoSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SandboxInfo{
+			ID:          "sbx-123",
+			Template:    "base",
+			State:       "running",
+			StartedAt:   "2024-01-01T00:00:00Z",
+			CPUCount:    2,
+			MemoryMB:    512,
+			DiskSizeMB:  1024,
+			EnvdVersion: "0.5.14",
+			Lifecycle: SandboxLifecycle{
+				AutoResume: false,
+				OnTimeout:  "kill",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-123",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	info, err := sbx.Info()
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+
+	if info.ID != "sbx-123" {
+		t.Errorf("ID = %q, want %q", info.ID, "sbx-123")
+	}
+	if info.Template != "base" {
+		t.Errorf("Template = %q, want %q", info.Template, "base")
+	}
+	if info.State != "running" {
+		t.Errorf("State = %q, want %q", info.State, "running")
+	}
+	if info.CPUCount != 2 {
+		t.Errorf("CPUCount = %d, want %d", info.CPUCount, 2)
+	}
+	if info.MemoryMB != 512 {
+		t.Errorf("MemoryMB = %d, want %d", info.MemoryMB, 512)
+	}
+}
+
+func TestInfoWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SandboxInfo{
+			ID:       "sbx-ctx",
+			Template: "python3",
+			State:    "running",
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-ctx",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	ctx := context.Background()
+	info, err := sbx.InfoWithContext(ctx)
+	if err != nil {
+		t.Fatalf("InfoWithContext: %v", err)
+	}
+
+	if info.ID != "sbx-ctx" {
+		t.Errorf("ID = %q, want %q", info.ID, "sbx-ctx")
+	}
+	if info.Template != "python3" {
+		t.Errorf("Template = %q, want %q", info.Template, "python3")
+	}
+	if info.State != "running" {
+		t.Errorf("State = %q, want %q", info.State, "running")
+	}
+}
+
+func TestInfoNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-gone",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	_, err := sbx.Info()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *SandboxNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	if e.SandboxID != "sbx-gone" {
+		t.Errorf("SandboxID = %q, want %q", e.SandboxID, "sbx-gone")
+	}
+}
+
+func TestInfoServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-123",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	_, err := sbx.Info()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestInfoInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-123",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	_, err := sbx.Info()
+	if err == nil {
+		t.Fatal("expected error for invalid JSON response")
+	}
+}
+
+func TestInfoWithCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(SandboxInfo{ID: "sbx-123"})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID:         "sbx-123",
+		apiKey:     "test-key",
+		apiBaseURL: srv.URL,
+		httpClient: http.DefaultClient,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.InfoWithContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
