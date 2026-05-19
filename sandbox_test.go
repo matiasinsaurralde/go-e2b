@@ -572,3 +572,231 @@ func TestInfoWithCanceledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context")
 	}
 }
+
+func TestClientListSandboxesSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/sandboxes" {
+			t.Errorf("path = %s, want /sandboxes", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxInfo{
+			{
+				ID:         "sbx-1",
+				Template:   "base",
+				State:      "running",
+				CPUCount:   2,
+				MemoryMB:   512,
+				DiskSizeMB: 23318,
+				StartedAt:  "2024-01-01T00:00:00Z",
+				EndAt:      "2024-01-01T00:10:00Z",
+			},
+			{
+				ID:         "sbx-2",
+				Template:   "python3",
+				State:      "running",
+				CPUCount:   4,
+				MemoryMB:   1024,
+				DiskSizeMB: 23318,
+				StartedAt:  "2024-01-01T00:05:00Z",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	items, err := client.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxes: %v", err)
+	}
+
+	if len(items) != 2 {
+		t.Fatalf("len = %d, want 2", len(items))
+	}
+	if items[0].ID != "sbx-1" {
+		t.Errorf("items[0].ID = %q, want %q", items[0].ID, "sbx-1")
+	}
+	if items[0].CPUCount != 2 {
+		t.Errorf("items[0].CPUCount = %d, want %d", items[0].CPUCount, 2)
+	}
+	if items[1].ID != "sbx-2" {
+		t.Errorf("items[1].ID = %q, want %q", items[1].ID, "sbx-2")
+	}
+	if items[1].MemoryMB != 1024 {
+		t.Errorf("items[1].MemoryMB = %d, want %d", items[1].MemoryMB, 1024)
+	}
+}
+
+func TestClientListSandboxesEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	items, err := client.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxes: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("len = %d, want 0", len(items))
+	}
+}
+
+func TestClientNewClientMissingAPIKey(t *testing.T) {
+	_, err := NewClient(ClientConfig{})
+	if err == nil {
+		t.Fatal("expected error for missing API key")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+}
+
+func TestClientAPIKeyFromEnv(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-API-Key"); got != "env-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "env-key")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	t.Setenv(apiKeyEnv, "env-key")
+
+	client, err := NewClient(ClientConfig{
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxes: %v", err)
+	}
+}
+
+func TestClientListSandboxesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxes(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestClientListSandboxesUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"invalid api key"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "bad-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxes(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestClientListSandboxesInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxes(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestClientListSandboxesCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.ListSandboxes(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
