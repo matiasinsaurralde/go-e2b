@@ -40,16 +40,18 @@ func newTestSandbox(t *testing.T, startFn func(context.Context, *connect.Request
 
 	origTransport := srv.Client().Transport
 	sbx := &Sandbox{
-		ID:            "sbx-test",
-		accessToken:   "token-test",
-		apiKey:        "key-test",
-		sandboxDomain: "test.e2b.app",
-		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				req.URL.Scheme = "https"
-				req.URL.Host = srv.Listener.Addr().String()
-				return origTransport.RoundTrip(req)
-			}),
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			apiKey:        "key-test",
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = "https"
+					req.URL.Host = srv.Listener.Addr().String()
+					return origTransport.RoundTrip(req)
+				}),
+			},
 		},
 	}
 	sbx.Commands = newCommandService(sbx)

@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -57,6 +58,69 @@ func NewClient(cfgs ...ClientConfig) (*Client, error) {
 		sandboxDomain: resolveSandboxDomain(cfg.SandboxDomain),
 		httpClient:    httpClient,
 	}, nil
+}
+
+// NewSandbox creates a new E2B sandbox microVM.
+// The caller should call Close when the sandbox is no longer needed.
+func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbox, error) {
+	var cfg SandboxConfig
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+
+	template := cfg.Template
+	if template == "" {
+		template = DefaultTemplate
+	}
+
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = DefaultTimeout
+	}
+
+	body, err := json.Marshal(createRequest{
+		TemplateID: template,
+		Timeout:    timeout,
+		EnvVars:    cfg.EnvVars,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("e2b: marshal create request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBaseURL+"/sandboxes", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send create request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &Error{StatusCode: resp.StatusCode, Message: fmt.Sprintf("template not found: %s", template)}
+		}
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var cr createResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		return nil, fmt.Errorf("e2b: decode create response: %w", err)
+	}
+
+	sbx := &Sandbox{
+		ID:          cr.SandboxID,
+		accessToken: cr.EnvdAccessToken,
+		client:      c,
+	}
+	sbx.Commands = newCommandService(sbx)
+	sbx.Filesystem = newFilesystemService(sbx)
+	return sbx, nil
 }
 
 // ListSandboxes returns all running sandboxes for this client's API key.

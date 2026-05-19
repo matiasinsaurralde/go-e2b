@@ -24,15 +24,17 @@ func newFilesystemTestSandbox(t *testing.T, handler http.HandlerFunc) *Sandbox {
 
 	origTransport := srv.Client().Transport
 	sbx := &Sandbox{
-		ID:            "sbx-test",
-		accessToken:   "token-test",
-		sandboxDomain: "test.e2b.app",
-		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				req.URL.Scheme = "https"
-				req.URL.Host = srv.Listener.Addr().String()
-				return origTransport.RoundTrip(req)
-			}),
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = "https"
+					req.URL.Host = srv.Listener.Addr().String()
+					return origTransport.RoundTrip(req)
+				}),
+			},
 		},
 	}
 	sbx.Filesystem = newFilesystemService(sbx)
@@ -444,8 +446,10 @@ func TestFilesystemWriteTimeout(t *testing.T) {
 
 func TestFilesystemFileURL(t *testing.T) {
 	sbx := &Sandbox{
-		ID:            "sbx-abc",
-		sandboxDomain: "e2b.app",
+		ID: "sbx-abc",
+		client: &Client{
+			sandboxDomain: "e2b.app",
+		},
 	}
 	fs := newFilesystemService(sbx)
 
@@ -461,8 +465,10 @@ func TestFilesystemFileURL(t *testing.T) {
 
 func TestFilesystemFileURLWithUser(t *testing.T) {
 	sbx := &Sandbox{
-		ID:            "sbx-abc",
-		sandboxDomain: "e2b.app",
+		ID: "sbx-abc",
+		client: &Client{
+			sandboxDomain: "e2b.app",
+		},
 	}
 	fs := newFilesystemService(sbx)
 
@@ -477,8 +483,10 @@ func TestFilesystemFileURLWithUser(t *testing.T) {
 
 func TestFilesystemFileURLSpecialChars(t *testing.T) {
 	sbx := &Sandbox{
-		ID:            "sbx-abc",
-		sandboxDomain: "e2b.app",
+		ID: "sbx-abc",
+		client: &Client{
+			sandboxDomain: "e2b.app",
+		},
 	}
 	fs := newFilesystemService(sbx)
 
@@ -501,10 +509,15 @@ func TestNewSandboxInitializesFilesystem(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sbx, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
 		APIBaseURL: srv.URL,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.NewSandbox(context.Background())
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
