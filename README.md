@@ -1,5 +1,12 @@
 # go-e2b
 
+[![CI](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/ci.yml/badge.svg)](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/ci.yml)
+[![Lint](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/lint.yml/badge.svg)](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/lint.yml)
+[![Security](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/security.yml/badge.svg)](https://github.com/matiasinsaurralde/go-e2b/actions/workflows/security.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/matiasinsaurralde/go-e2b.svg)](https://pkg.go.dev/github.com/matiasinsaurralde/go-e2b)
+[![License: MIT](https://img.shields.io/github/license/matiasinsaurralde/go-e2b)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/matiasinsaurralde/go-e2b)](go.mod)
+
 A Go SDK for the [E2B](https://e2b.dev) cloud sandbox API. E2B provides lightweight microVMs you can use to safely run arbitrary code in ephemeral environments.
 
 ## Installation
@@ -10,7 +17,7 @@ go get github.com/matiasinsaurralde/go-e2b
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - An [E2B API key](https://e2b.dev/dashboard)
 
 ## Quick Start
@@ -19,6 +26,7 @@ go get github.com/matiasinsaurralde/go-e2b
 package main
 
 import (
+    "context"
     "fmt"
     "log"
     "os"
@@ -27,8 +35,15 @@ import (
 )
 
 func main() {
-    sandbox, err := e2b.NewSandbox(e2b.SandboxConfig{
+    client, err := e2b.NewClient(e2b.ClientConfig{
         APIKey: os.Getenv("E2B_API_KEY"),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    sandbox, err := client.NewSandbox(context.Background(), e2b.SandboxConfig{
+        Template: "base",
     })
     if err != nil {
         log.Fatal(err)
@@ -40,18 +55,28 @@ func main() {
         log.Fatal(err)
     }
 
-    fmt.Println(result.Stdout)   // hello, world
-    fmt.Println(result.ExitCode) // 0
+    fmt.Println(result.Stdout)     // hello, world
+    fmt.Println(result.ExitCode)   // 0
 }
 ```
 
+See [examples/](examples/) for more usage patterns.
+
 ## Usage
 
-### Creating a Sandbox
+### Creating a Client and Sandbox
 
 ```go
-sandbox, err := e2b.NewSandbox(e2b.SandboxConfig{
-    APIKey:   "your-api-key",       // or set E2B_API_KEY env var
+client, err := e2b.NewClient(e2b.ClientConfig{
+    APIKey:        "your-api-key",       // or set E2B_API_KEY env var
+    APIBaseURL:    "https://api.e2b.app", // optional
+    SandboxDomain: "e2b.app",             // optional
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+sandbox, err := client.NewSandbox(context.Background(), e2b.SandboxConfig{
     Template: "base",               // sandbox template (default: "base")
     Timeout:  300,                  // lifetime in seconds (default: 300)
     EnvVars:  map[string]string{    // environment variables
@@ -88,9 +113,16 @@ fmt.Println(result.ExitCode)
 ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
 
-sandbox, err := e2b.NewSandboxWithContext(ctx, e2b.SandboxConfig{
-    APIKey: apiKey,
-})
+client, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
+if err != nil {
+    log.Fatal(err)
+}
+
+sandbox, err := client.NewSandbox(ctx, e2b.SandboxConfig{Template: "base"})
+if err != nil {
+    log.Fatal(err)
+}
+defer sandbox.Close()
 
 result, err := sandbox.Commands.RunWithContext(ctx, "sleep", []string{"5"})
 ```
@@ -106,22 +138,22 @@ result, err := sandbox.Commands.RunWithContext(ctx, "sleep", []string{"5"})
 
 ## Configuration
 
-Configuration can be provided via `SandboxConfig` fields or environment variables:
+Configuration can be provided via `ClientConfig` / `SandboxConfig` fields or environment variables:
 
 | Field | Env Var | Default | Description |
 |-------|---------|---------|-------------|
-| `APIKey` | `E2B_API_KEY` | — | E2B API key (required) |
-| `APIBaseURL` | `E2B_API_URL` | `https://api.e2b.app` | API base URL |
-| `SandboxDomain` | `E2B_SANDBOX_URL` | `e2b.app` | Sandbox domain |
-| `Template` | — | `base` | Sandbox template ID |
-| `Timeout` | — | `300` | Sandbox lifetime in seconds |
+| `ClientConfig.APIKey` | `E2B_API_KEY` | — | E2B API key (required) |
+| `ClientConfig.APIBaseURL` | `E2B_API_URL` | `https://api.e2b.app` | API base URL |
+| `ClientConfig.SandboxDomain` | `E2B_SANDBOX_URL` | `e2b.app` | Sandbox domain |
+| `SandboxConfig.Template` | — | `base` | Sandbox template ID |
+| `SandboxConfig.Timeout` | — | `300` | Sandbox lifetime in seconds |
 
 ## Error Handling
 
 ```go
 import e2b "github.com/matiasinsaurralde/go-e2b"
 
-_, err := e2b.NewSandbox(cfg)
+_, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
 switch {
 case errors.As(err, &e2b.SandboxNotFoundError{}):
     // sandbox not found
