@@ -185,3 +185,48 @@ func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int)
 		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
 	}
 }
+
+// SandboxMetric holds a single resource usage snapshot for a sandbox.
+type SandboxMetric struct {
+	CPUCount      int     `json:"cpuCount"`
+	CPUUsedPct    float64 `json:"cpuUsedPct"`
+	MemTotal      int64   `json:"memTotal"`
+	MemUsed       int64   `json:"memUsed"`
+	MemCache      int64   `json:"memCache"`
+	DiskTotal     int64   `json:"diskTotal"`
+	DiskUsed      int64   `json:"diskUsed"`
+	Timestamp     string  `json:"timestamp"`
+	TimestampUnix int64   `json:"timestampUnix"`
+}
+
+// Metrics retrieves resource usage metrics for the sandbox.
+func (s *Sandbox) Metrics() ([]SandboxMetric, error) {
+	return s.MetricsWithContext(context.Background())
+}
+
+// MetricsWithContext retrieves resource usage metrics using the provided context.
+func (s *Sandbox) MetricsWithContext(ctx context.Context) ([]SandboxMetric, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/metrics", nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build metrics request: %w", err)
+	}
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send metrics request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var metrics []SandboxMetric
+	if err := json.NewDecoder(resp.Body).Decode(&metrics); err != nil {
+		return nil, fmt.Errorf("e2b: decode metrics response: %w", err)
+	}
+
+	return metrics, nil
+}
