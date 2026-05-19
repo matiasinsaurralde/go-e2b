@@ -11,7 +11,7 @@ This document tracks the sandbox management API endpoints and their implementati
 | ✅ | **HIGH** | `/sandboxes/{id}` | GET | Get sandbox details | `sandbox.Info()` |
 | ✅ | **HIGH** | `/sandboxes` | GET | List all sandboxes | `client.ListSandboxes(ctx)` |
 | ✅ | **HIGH** | `/sandboxes/{id}/timeout` | POST | Update sandbox lifetime | `sandbox.SetTimeout(secs)` |
-| ❌ | **MEDIUM** | `/sandboxes/{id}/metrics` | GET | Get resource usage | — |
+| ✅ | **MEDIUM** | `/sandboxes/{id}/metrics` | GET | Get resource usage | `sandbox.Metrics()` |
 | ❌ | **MEDIUM** | `/sandboxes/{id}/logs/v2` | GET | Access sandbox logs | — |
 | ❌ | **LOW** | `/sandboxes/{id}/pause` | POST | Pause sandbox | — |
 | ❌ | **LOW** | `/sandboxes/{id}/snapshots` | POST | Create snapshot | — |
@@ -84,29 +84,43 @@ err := sandbox.SetTimeout(600) // extend to 10 minutes
 err := sandbox.SetTimeoutWithContext(ctx, 600)
 ```
 
----
-
-## Missing Endpoints
-
-### 6. Get Sandbox Metrics (❌ MEDIUM PRIORITY)
+### 6. Get Sandbox Metrics (✅ Implemented)
 
 **Endpoint:** `GET /sandboxes/{id}/metrics`
 
-**Purpose:** Monitor resource usage (CPU, memory, disk).
-
-**Proposed API:**
+Returns `[]SandboxMetric` with periodic resource usage snapshots (CPU, memory, disk). The API returns `200 OK` with an empty array `[]` when no metrics are available yet (including for nonexistent sandbox IDs — no 404 is returned).
 
 ```go
-// Metrics retrieves resource usage metrics for the sandbox.
-func (s *Sandbox) Metrics(ctx context.Context) ([]SandboxMetric, error)
+metrics, err := sandbox.Metrics()
+// or with context:
+metrics, err := sandbox.MetricsWithContext(ctx)
 
-// Usage:
-metrics, err := sandbox.Metrics(ctx)
+for _, m := range metrics {
+    fmt.Printf("CPU: %.1f%%, Mem: %d/%d bytes, Disk: %d/%d bytes\n",
+        m.CPUUsedPct, m.MemUsed, m.MemTotal, m.DiskUsed, m.DiskTotal)
+}
 ```
 
-**Note:** Need to verify actual API response shape before implementing.
+**API response shape** (verified via curl):
+```json
+[
+  {
+    "cpuCount": 2,
+    "cpuUsedPct": 13.43,
+    "memTotal": 505417728,
+    "memUsed": 49197056,
+    "memCache": 69632000,
+    "diskTotal": 22772514816,
+    "diskUsed": 1681707008,
+    "timestamp": "2026-05-19T07:11:20Z",
+    "timestampUnix": 1779174680
+  }
+]
+```
 
 ---
+
+## Missing Endpoints
 
 ### 7. Get Sandbox Logs (❌ MEDIUM PRIORITY)
 
@@ -117,10 +131,6 @@ metrics, err := sandbox.Metrics(ctx)
 **Proposed API:**
 
 ```go
-// Logs retrieves sandbox logs.
-func (s *Sandbox) Logs(ctx context.Context, opts ...LogsOption) ([]LogEntry, error)
-
-// Usage:
 logs, err := sandbox.Logs(ctx, WithLogLines(50))
 ```
 
@@ -137,10 +147,6 @@ logs, err := sandbox.Logs(ctx, WithLogLines(50))
 **Proposed API:**
 
 ```go
-// Pause pauses the sandbox.
-func (s *Sandbox) Pause(ctx context.Context) error
-
-// Usage:
 err := sandbox.Pause(ctx)
 ```
 
@@ -155,10 +161,6 @@ err := sandbox.Pause(ctx)
 **Proposed API:**
 
 ```go
-// CreateSnapshot creates a snapshot of the sandbox.
-func (s *Sandbox) CreateSnapshot(ctx context.Context) (*Snapshot, error)
-
-// Usage:
 snapshot, err := sandbox.CreateSnapshot(ctx)
 ```
 
@@ -173,10 +175,6 @@ snapshot, err := sandbox.CreateSnapshot(ctx)
 **Proposed API:**
 
 ```go
-// ListSnapshots retrieves all snapshots for the sandbox.
-func (s *Sandbox) ListSnapshots(ctx context.Context) ([]Snapshot, error)
-
-// Usage:
 snapshots, err := sandbox.ListSnapshots(ctx)
 ```
 
@@ -212,7 +210,7 @@ All methods follow the established SDK conventions:
 - [x] Get sandbox details (`sandbox.Info`)
 - [x] List sandboxes (`client.ListSandboxes`)
 - [x] Update sandbox timeout (`sandbox.SetTimeout`)
-- [ ] Get sandbox metrics (`sandbox.Metrics`)
+- [x] Get sandbox metrics (`sandbox.Metrics`)
 - [ ] Get sandbox logs (`sandbox.Logs`)
 - [ ] Pause sandbox (`sandbox.Pause`)
 - [ ] Create snapshot (`sandbox.CreateSnapshot`)

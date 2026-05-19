@@ -762,6 +762,212 @@ func TestSetTimeoutOKStatus(t *testing.T) {
 	}
 }
 
+func TestMetricsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123/metrics" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/metrics", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxMetric{
+			{
+				CPUCount:      2,
+				CPUUsedPct:    13.43,
+				MemTotal:      505417728,
+				MemUsed:       49197056,
+				MemCache:      69632000,
+				DiskTotal:     22772514816,
+				DiskUsed:      1681707008,
+				Timestamp:     "2026-05-19T07:11:20Z",
+				TimestampUnix: 1779174680,
+			},
+			{
+				CPUCount:      2,
+				CPUUsedPct:    0.6,
+				MemTotal:      505417728,
+				MemUsed:       50085888,
+				MemCache:      69632000,
+				DiskTotal:     22772514816,
+				DiskUsed:      1681707008,
+				Timestamp:     "2026-05-19T07:11:25Z",
+				TimestampUnix: 1779174685,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	metrics, err := sbx.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+
+	if len(metrics) != 2 {
+		t.Fatalf("len = %d, want 2", len(metrics))
+	}
+	if metrics[0].CPUCount != 2 {
+		t.Errorf("CPUCount = %d, want 2", metrics[0].CPUCount)
+	}
+	if metrics[0].CPUUsedPct != 13.43 {
+		t.Errorf("CPUUsedPct = %f, want 13.43", metrics[0].CPUUsedPct)
+	}
+	if metrics[0].MemTotal != 505417728 {
+		t.Errorf("MemTotal = %d, want 505417728", metrics[0].MemTotal)
+	}
+	if metrics[0].DiskUsed != 1681707008 {
+		t.Errorf("DiskUsed = %d, want 1681707008", metrics[0].DiskUsed)
+	}
+	if metrics[0].TimestampUnix != 1779174680 {
+		t.Errorf("TimestampUnix = %d, want 1779174680", metrics[0].TimestampUnix)
+	}
+	if metrics[1].CPUUsedPct != 0.6 {
+		t.Errorf("metrics[1].CPUUsedPct = %f, want 0.6", metrics[1].CPUUsedPct)
+	}
+}
+
+func TestMetricsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	metrics, err := sbx.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if len(metrics) != 0 {
+		t.Errorf("len = %d, want 0", len(metrics))
+	}
+}
+
+func TestMetricsWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxMetric{{CPUCount: 4, CPUUsedPct: 50.0}})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	metrics, err := sbx.MetricsWithContext(context.Background())
+	if err != nil {
+		t.Fatalf("MetricsWithContext: %v", err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("len = %d, want 1", len(metrics))
+	}
+	if metrics[0].CPUCount != 4 {
+		t.Errorf("CPUCount = %d, want 4", metrics[0].CPUCount)
+	}
+}
+
+func TestMetricsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.Metrics()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestMetricsInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.Metrics()
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestMetricsCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.MetricsWithContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
 func TestClientListSandboxesSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
