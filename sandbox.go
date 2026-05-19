@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -143,4 +144,44 @@ func (s *Sandbox) InfoWithContext(ctx context.Context) (*SandboxInfo, error) {
 	}
 
 	return &info, nil
+}
+
+type setTimeoutRequest struct {
+	Timeout int `json:"timeout"`
+}
+
+// SetTimeout updates the sandbox lifetime timeout in seconds.
+func (s *Sandbox) SetTimeout(timeoutSeconds int) error {
+	return s.SetTimeoutWithContext(context.Background(), timeoutSeconds)
+}
+
+// SetTimeoutWithContext updates the sandbox lifetime timeout using the provided context.
+func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int) error {
+	body, err := json.Marshal(setTimeoutRequest{Timeout: timeoutSeconds})
+	if err != nil {
+		return fmt.Errorf("e2b: marshal timeout request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/timeout", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("e2b: build timeout request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send timeout request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return &SandboxNotFoundError{SandboxID: s.ID}
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
 }

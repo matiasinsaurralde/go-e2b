@@ -599,6 +599,169 @@ func TestInfoWithCanceledContext(t *testing.T) {
 	}
 }
 
+func TestSetTimeoutSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123/timeout" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/timeout", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", got, "application/json")
+		}
+
+		var body setTimeoutRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Timeout != 600 {
+			t.Errorf("timeout = %d, want %d", body.Timeout, 600)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.SetTimeout(600); err != nil {
+		t.Fatalf("SetTimeout: %v", err)
+	}
+}
+
+func TestSetTimeoutWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.SetTimeoutWithContext(context.Background(), 300); err != nil {
+		t.Fatalf("SetTimeoutWithContext: %v", err)
+	}
+}
+
+func TestSetTimeoutNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"message":"sandbox not found"}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-gone",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.SetTimeout(600)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *SandboxNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	if e.SandboxID != "sbx-gone" {
+		t.Errorf("SandboxID = %q, want %q", e.SandboxID, "sbx-gone")
+	}
+}
+
+func TestSetTimeoutServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.SetTimeout(600)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestSetTimeoutCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := sbx.SetTimeoutWithContext(ctx, 600)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
+func TestSetTimeoutOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.SetTimeout(600); err != nil {
+		t.Fatalf("SetTimeout with 200 OK: %v", err)
+	}
+}
+
 func TestClientListSandboxesSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
