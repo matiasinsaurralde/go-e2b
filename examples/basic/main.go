@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -14,8 +15,12 @@ func main() {
 		log.Fatal("E2B_API_KEY is not set")
 	}
 
-	sandbox, err := e2b.NewSandbox(e2b.SandboxConfig{
-		APIKey:   apiKey,
+	client, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
+
+	sandbox, err := client.NewSandbox(context.Background(), e2b.SandboxConfig{
 		Template: "base",
 	})
 	if err != nil {

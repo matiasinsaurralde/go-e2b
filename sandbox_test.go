@@ -46,10 +46,16 @@ func TestNewSandboxSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sbx, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
-		EnvVars:    map[string]string{"KEY": "value"},
 		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		EnvVars: map[string]string{"KEY": "value"},
 	})
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
@@ -84,28 +90,23 @@ func TestNewSandboxCustomTemplate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sbx, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
-		Template:   "python3",
-		Timeout:    120,
 		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		Template: "python3",
+		Timeout:  120,
 	})
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
 	if sbx.ID != "sbx-custom" {
 		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-custom")
-	}
-}
-
-func TestNewSandboxMissingAPIKey(t *testing.T) {
-	_, err := NewSandbox(SandboxConfig{})
-	if err == nil {
-		t.Fatal("expected error for missing API key")
-	}
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %T", err)
 	}
 }
 
@@ -116,10 +117,15 @@ func TestNewSandboxAPIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "bad-key",
 		APIBaseURL: srv.URL,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.NewSandbox(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -138,10 +144,15 @@ func TestNewSandboxNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
 		APIBaseURL: srv.URL,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.NewSandbox(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -161,10 +172,15 @@ func TestNewSandboxInvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewSandbox(SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
 		APIBaseURL: srv.URL,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.NewSandbox(context.Background())
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response")
 	}
@@ -186,10 +202,12 @@ func TestCloseSuccess(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	if err := sbx.Close(); err != nil {
@@ -204,10 +222,12 @@ func TestCloseOKStatus(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	if err := sbx.Close(); err != nil {
@@ -222,10 +242,12 @@ func TestCloseNotFound(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-gone",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-gone",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	err := sbx.Close()
@@ -249,10 +271,12 @@ func TestCloseServerError(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	err := sbx.Close()
@@ -275,13 +299,17 @@ func TestNewSandboxWithContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ctx := context.Background()
-	sbx, err := NewSandboxWithContext(ctx, SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
 		APIBaseURL: srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewSandboxWithContext: %v", err)
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.NewSandbox(context.Background())
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
 	}
 	if sbx.ID != "sbx-ctx" {
 		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-ctx")
@@ -295,13 +323,18 @@ func TestNewSandboxCanceledContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately.
-
-	_, err := NewSandboxWithContext(ctx, SandboxConfig{
+	client, err := NewClient(ClientConfig{
 		APIKey:     "test-key",
 		APIBaseURL: srv.URL,
 	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.NewSandbox(ctx)
 	if err == nil {
 		t.Fatal("expected error for canceled context")
 	}
@@ -314,14 +347,15 @@ func TestCloseWithContext(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-ctx",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-ctx",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
-	ctx := context.Background()
-	if err := sbx.CloseWithContext(ctx); err != nil {
+	if err := sbx.CloseWithContext(context.Background()); err != nil {
 		t.Fatalf("CloseWithContext: %v", err)
 	}
 }
@@ -333,10 +367,12 @@ func TestCloseWithCanceledContext(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-ctx",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-ctx",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -348,33 +384,12 @@ func TestCloseWithCanceledContext(t *testing.T) {
 	}
 }
 
-func TestNewSandboxAPIKeyFromEnv(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-API-Key"); got != "env-api-key" {
-			t.Errorf("X-API-Key = %q, want %q", got, "env-api-key")
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(createResponse{SandboxID: "sbx-env"})
-	}))
-	defer srv.Close()
-
-	t.Setenv(apiKeyEnv, "env-api-key")
-
-	sbx, err := NewSandbox(SandboxConfig{
-		APIBaseURL: srv.URL,
-	})
-	if err != nil {
-		t.Fatalf("NewSandbox: %v", err)
-	}
-	if sbx.ID != "sbx-env" {
-		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-env")
-	}
-}
-
 func TestEnvdBaseURL(t *testing.T) {
 	sbx := &Sandbox{
-		ID:            "sbx-abc",
-		sandboxDomain: "e2b.app",
+		ID: "sbx-abc",
+		client: &Client{
+			sandboxDomain: "e2b.app",
+		},
 	}
 	got := sbx.envdBaseURL()
 	want := "https://49983-sbx-abc.e2b.app"
@@ -414,10 +429,12 @@ func TestInfoSuccess(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	info, err := sbx.Info()
@@ -454,14 +471,15 @@ func TestInfoWithContext(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-ctx",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-ctx",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
-	ctx := context.Background()
-	info, err := sbx.InfoWithContext(ctx)
+	info, err := sbx.InfoWithContext(context.Background())
 	if err != nil {
 		t.Fatalf("InfoWithContext: %v", err)
 	}
@@ -484,10 +502,12 @@ func TestInfoNotFound(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-gone",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-gone",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	_, err := sbx.Info()
@@ -511,10 +531,12 @@ func TestInfoServerError(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	_, err := sbx.Info()
@@ -538,10 +560,12 @@ func TestInfoInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	_, err := sbx.Info()
@@ -558,10 +582,12 @@ func TestInfoWithCanceledContext(t *testing.T) {
 	defer srv.Close()
 
 	sbx := &Sandbox{
-		ID:         "sbx-123",
-		apiKey:     "test-key",
-		apiBaseURL: srv.URL,
-		httpClient: http.DefaultClient,
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

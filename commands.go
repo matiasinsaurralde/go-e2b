@@ -108,7 +108,7 @@ func (c *CommandService) RunWithContext(ctx context.Context, cmd string, args []
 		req.Header().Set("User", rc.user)
 	}
 
-	client := processconnect.NewProcessClient(c.sandbox.httpClient, c.sandbox.envdBaseURL())
+	client := processconnect.NewProcessClient(c.sandbox.client.httpClient, c.sandbox.envdBaseURL())
 	stream, err := client.Start(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: start process: %w", err)

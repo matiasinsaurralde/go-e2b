@@ -113,7 +113,7 @@ func (f *FilesystemService) Read(ctx context.Context, path string, opts ...ReadO
 	}
 	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
 
-	resp, err := f.sandbox.httpClient.Do(req)
+	resp, err := f.sandbox.client.httpClient.Do(req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("e2b: send read request: %w", err)
@@ -181,7 +181,7 @@ func (f *FilesystemService) Write(ctx context.Context, path string, r io.Reader,
 	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := f.sandbox.httpClient.Do(req)
+	resp, err := f.sandbox.client.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: send write request: %w", err)
 	}

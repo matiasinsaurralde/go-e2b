@@ -5,8 +5,14 @@
 //
 // Basic usage:
 //
-//	sandbox, err := e2b.NewSandbox(e2b.SandboxConfig{
-//	    APIKey:   os.Getenv("E2B_API_KEY"),
+//	client, err := e2b.NewClient(e2b.ClientConfig{
+//	    APIKey: os.Getenv("E2B_API_KEY"),
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	sandbox, err := client.NewSandbox(context.Background(), e2b.SandboxConfig{
 //	    Template: "base",
 //	    EnvVars:  map[string]string{"VALUE": "hello"},
 //	})

@@ -16,10 +16,14 @@ func main() {
 		log.Fatal("E2B_API_KEY environment variable is not set")
 	}
 
+	client, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
+
 	// Create a sandbox
 	ctx := context.Background()
-	sandbox, err := e2b.NewSandboxWithContext(ctx, e2b.SandboxConfig{
-		APIKey:   apiKey,
+	sandbox, err := client.NewSandbox(ctx, e2b.SandboxConfig{
 		Template: "base",
 		Timeout:  600,
 		EnvVars:  map[string]string{"DEMO": "true"},
