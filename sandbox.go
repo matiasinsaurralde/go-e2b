@@ -65,6 +65,35 @@ type createResponse struct {
 	EnvdAccessToken string `json:"envdAccessToken"`
 }
 
+// SandboxLifecycle holds lifecycle configuration for a sandbox.
+type SandboxLifecycle struct {
+	AutoResume bool   `json:"autoResume"`
+	OnTimeout  string `json:"onTimeout"` // "keep" or "kill"
+}
+
+// VolumeMount represents a mounted volume in the sandbox.
+type VolumeMount struct {
+	Name string `json:"name,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+// SandboxInfo holds details about a sandbox.
+type SandboxInfo struct {
+	ID           string           `json:"sandboxID"`
+	Alias        string           `json:"alias,omitempty"`
+	ClientID     string           `json:"clientID,omitempty"`
+	Template     string           `json:"templateID"`
+	State        string           `json:"state"`
+	CPUCount     int              `json:"cpuCount"`
+	MemoryMB     int              `json:"memoryMB"`
+	DiskSizeMB   int              `json:"diskSizeMB"`
+	StartedAt    string           `json:"startedAt"`
+	EndAt        string           `json:"endAt,omitempty"`
+	EnvdVersion  string           `json:"envdVersion,omitempty"`
+	Lifecycle    SandboxLifecycle `json:"lifecycle,omitempty"`
+	VolumeMounts []VolumeMount    `json:"volumeMounts,omitempty"`
+}
+
 // NewSandbox creates a new E2B sandbox microVM with the given configuration.
 // The caller should call Close when the sandbox is no longer needed.
 func NewSandbox(cfg SandboxConfig) (*Sandbox, error) {
@@ -178,4 +207,39 @@ func (s *Sandbox) CloseWithContext(ctx context.Context) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
 	}
+}
+
+// Info retrieves detailed information about the sandbox.
+func (s *Sandbox) Info() (*SandboxInfo, error) {
+	return s.InfoWithContext(context.Background())
+}
+
+// InfoWithContext retrieves detailed information about the sandbox using the provided context.
+func (s *Sandbox) InfoWithContext(ctx context.Context) (*SandboxInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiBaseURL+"/sandboxes/"+s.ID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build info request: %w", err)
+	}
+	req.Header.Set("X-API-Key", s.apiKey)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send info request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &SandboxNotFoundError{SandboxID: s.ID}
+		}
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var info SandboxInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("e2b: decode info response: %w", err)
+	}
+
+	return &info, nil
 }
