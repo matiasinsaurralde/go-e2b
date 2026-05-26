@@ -1195,3 +1195,240 @@ func TestClientListSandboxesCanceledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context")
 	}
 }
+
+func TestLogsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/v2/sandboxes/sbx-123/logs" {
+			t.Errorf("path = %s, want /v2/sandboxes/sbx-123/logs", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(logsResponse{
+			Logs: []SandboxLogEntry{
+				{
+					Level:     "info",
+					Message:   "Sandbox created",
+					Timestamp: "2026-05-26T05:02:49.929925877Z",
+					Fields:    map[string]string{"logger": "orchestration-api", "sandboxID": "sbx-123"},
+				},
+				{
+					Level:     "debug",
+					Message:   "Started creating sandbox",
+					Timestamp: "2026-05-26T05:02:49.802974399Z",
+					Fields:    map[string]string{"logger": "orchestration-api"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	logs, err := sbx.Logs()
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+
+	if len(logs) != 2 {
+		t.Fatalf("len = %d, want 2", len(logs))
+	}
+	if logs[0].Level != "info" {
+		t.Errorf("Level = %q, want %q", logs[0].Level, "info")
+	}
+	if logs[0].Message != "Sandbox created" {
+		t.Errorf("Message = %q, want %q", logs[0].Message, "Sandbox created")
+	}
+	if logs[0].Fields["logger"] != "orchestration-api" {
+		t.Errorf("Fields[logger] = %q, want %q", logs[0].Fields["logger"], "orchestration-api")
+	}
+	if logs[1].Level != "debug" {
+		t.Errorf("logs[1].Level = %q, want %q", logs[1].Level, "debug")
+	}
+}
+
+func TestLogsWithOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("limit"); got != "5" {
+			t.Errorf("limit = %q, want %q", got, "5")
+		}
+		if got := q.Get("direction"); got != "forward" {
+			t.Errorf("direction = %q, want %q", got, "forward")
+		}
+		if got := q.Get("level"); got != "info" {
+			t.Errorf("level = %q, want %q", got, "info")
+		}
+		if got := q.Get("search"); got != "sandbox" {
+			t.Errorf("search = %q, want %q", got, "sandbox")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(logsResponse{
+			Logs: []SandboxLogEntry{
+				{Level: "info", Message: "Sandbox created", Timestamp: "2026-05-26T05:02:49Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	logs, err := sbx.LogsWithContext(context.Background(),
+		WithLimit(5),
+		WithDirection("forward"),
+		WithLevel("info"),
+		WithSearch("sandbox"),
+	)
+	if err != nil {
+		t.Fatalf("LogsWithContext: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len = %d, want 1", len(logs))
+	}
+}
+
+func TestLogsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"logs":[]}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	logs, err := sbx.Logs()
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Errorf("len = %d, want 0", len(logs))
+	}
+}
+
+func TestLogsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.Logs()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestLogsInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.Logs()
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestLogsCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"logs":[]}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.LogsWithContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
+func TestLogsNoOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Errorf("expected no query params, got %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"logs":[]}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.Logs()
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+}

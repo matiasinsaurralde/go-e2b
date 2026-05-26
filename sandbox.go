@@ -230,3 +230,100 @@ func (s *Sandbox) MetricsWithContext(ctx context.Context) ([]SandboxMetric, erro
 
 	return metrics, nil
 }
+
+// SandboxLogEntry holds a single structured log entry from a sandbox.
+type SandboxLogEntry struct {
+	Level     string            `json:"level"`
+	Message   string            `json:"message"`
+	Timestamp string            `json:"timestamp"`
+	Fields    map[string]string `json:"fields"`
+}
+
+type logsResponse struct {
+	Logs []SandboxLogEntry `json:"logs"`
+}
+
+type logsParams struct {
+	limit     int
+	direction string
+	level     string
+	search    string
+}
+
+// LogsOption configures a Logs request.
+type LogsOption func(*logsParams)
+
+// WithLimit sets the maximum number of log entries to return (default 1000).
+func WithLimit(n int) LogsOption {
+	return func(p *logsParams) { p.limit = n }
+}
+
+// WithDirection sets the sort order: "forward" (oldest first) or "backward" (newest first, default).
+func WithDirection(d string) LogsOption {
+	return func(p *logsParams) { p.direction = d }
+}
+
+// WithLevel filters logs by level: "debug", "info", "warn", or "error".
+func WithLevel(l string) LogsOption {
+	return func(p *logsParams) { p.level = l }
+}
+
+// WithSearch filters logs by a text search on the message field.
+func WithSearch(q string) LogsOption {
+	return func(p *logsParams) { p.search = q }
+}
+
+// Logs retrieves structured log entries for the sandbox.
+func (s *Sandbox) Logs(opts ...LogsOption) ([]SandboxLogEntry, error) {
+	return s.LogsWithContext(context.Background(), opts...)
+}
+
+// LogsWithContext retrieves structured log entries using the provided context.
+func (s *Sandbox) LogsWithContext(ctx context.Context, opts ...LogsOption) ([]SandboxLogEntry, error) {
+	var p logsParams
+	for _, o := range opts {
+		o(&p)
+	}
+
+	u := s.client.apiBaseURL + "/v2/sandboxes/" + s.ID + "/logs"
+	sep := '?'
+	if p.limit > 0 {
+		u += string(sep) + "limit=" + fmt.Sprintf("%d", p.limit)
+		sep = '&'
+	}
+	if p.direction != "" {
+		u += string(sep) + "direction=" + p.direction
+		sep = '&'
+	}
+	if p.level != "" {
+		u += string(sep) + "level=" + p.level
+		sep = '&'
+	}
+	if p.search != "" {
+		u += string(sep) + "search=" + p.search
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build logs request: %w", err)
+	}
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send logs request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var lr logsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
+		return nil, fmt.Errorf("e2b: decode logs response: %w", err)
+	}
+
+	return lr.Logs, nil
+}
