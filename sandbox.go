@@ -186,6 +186,77 @@ func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int)
 	}
 }
 
+// Pause pauses the sandbox, stopping billing while preserving state.
+// A paused sandbox can be resumed with Resume.
+func (s *Sandbox) Pause() error {
+	return s.PauseWithContext(context.Background())
+}
+
+// PauseWithContext pauses the sandbox using the provided context.
+func (s *Sandbox) PauseWithContext(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/pause", nil)
+	if err != nil {
+		return fmt.Errorf("e2b: build pause request: %w", err)
+	}
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send pause request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return &SandboxNotFoundError{SandboxID: s.ID}
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+}
+
+type resumeRequest struct {
+	Timeout int `json:"timeout"`
+}
+
+// Resume resumes a paused sandbox with the given lifetime timeout in seconds.
+func (s *Sandbox) Resume(timeoutSeconds int) error {
+	return s.ResumeWithContext(context.Background(), timeoutSeconds)
+}
+
+// ResumeWithContext resumes a paused sandbox using the provided context.
+func (s *Sandbox) ResumeWithContext(ctx context.Context, timeoutSeconds int) error {
+	body, err := json.Marshal(resumeRequest{Timeout: timeoutSeconds})
+	if err != nil {
+		return fmt.Errorf("e2b: marshal resume request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/resume", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("e2b: build resume request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send resume request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK, http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		return &SandboxNotFoundError{SandboxID: s.ID}
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+}
+
 // SandboxMetric holds a single resource usage snapshot for a sandbox.
 type SandboxMetric struct {
 	CPUCount      int     `json:"cpuCount"`
