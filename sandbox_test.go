@@ -1770,3 +1770,380 @@ func TestResumeCanceledContext(t *testing.T) {
 		t.Fatal("expected error for canceled context")
 	}
 }
+
+// --- CreateSnapshot tests ---
+
+func TestCreateSnapshotSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123/snapshots" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/snapshots", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", got, "application/json")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(SnapshotInfo{
+			Names:      []string{"team/my-snap"},
+			SnapshotID: "team/my-snap:default",
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	info, err := sbx.CreateSnapshot(context.Background(), "my-snap")
+	if err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if info.SnapshotID != "team/my-snap:default" {
+		t.Errorf("SnapshotID = %q, want %q", info.SnapshotID, "team/my-snap:default")
+	}
+	if len(info.Names) != 1 || info.Names[0] != "team/my-snap" {
+		t.Errorf("Names = %v, want [team/my-snap]", info.Names)
+	}
+}
+
+func TestCreateSnapshotNoName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body createSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Name != "" {
+			t.Errorf("name = %q, want empty", body.Name)
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(SnapshotInfo{
+			Names:      []string{},
+			SnapshotID: "rawid123:default",
+		})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	info, err := sbx.CreateSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if info.SnapshotID != "rawid123:default" {
+		t.Errorf("SnapshotID = %q, want %q", info.SnapshotID, "rawid123:default")
+	}
+	if len(info.Names) != 0 {
+		t.Errorf("Names = %v, want empty", info.Names)
+	}
+}
+
+func TestCreateSnapshotNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"message":"Sandbox not found"}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-gone",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.CreateSnapshot(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var notFound *SandboxNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("error type = %T, want *SandboxNotFoundError", err)
+	}
+	if notFound.SandboxID != "sbx-gone" {
+		t.Errorf("SandboxID = %q, want %q", notFound.SandboxID, "sbx-gone")
+	}
+}
+
+func TestCreateSnapshotServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.CreateSnapshot(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestCreateSnapshotInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	_, err := sbx.CreateSnapshot(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestCreateSnapshotCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(SnapshotInfo{SnapshotID: "snap-1"})
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.CreateSnapshot(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
+// --- ListSnapshots tests ---
+
+func TestListSnapshotsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/snapshots" {
+			t.Errorf("path = %s, want /snapshots", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SnapshotInfo{
+			{Names: []string{"team/snap1"}, SnapshotID: "team/snap1:default"},
+			{Names: []string{}, SnapshotID: "rawid:default"},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(result.Snapshots) != 2 {
+		t.Fatalf("len = %d, want 2", len(result.Snapshots))
+	}
+	if result.Snapshots[0].SnapshotID != "team/snap1:default" {
+		t.Errorf("Snapshots[0].SnapshotID = %q, want %q", result.Snapshots[0].SnapshotID, "team/snap1:default")
+	}
+	if result.NextToken != "" {
+		t.Errorf("NextToken = %q, want empty", result.NextToken)
+	}
+}
+
+func TestListSnapshotsWithOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("sandboxID"); got != "sbx-123" {
+			t.Errorf("sandboxID = %q, want %q", got, "sbx-123")
+		}
+		if got := q.Get("limit"); got != "5" {
+			t.Errorf("limit = %q, want %q", got, "5")
+		}
+		if got := q.Get("nextToken"); got != "abc123" {
+			t.Errorf("nextToken = %q, want %q", got, "abc123")
+		}
+
+		w.Header().Set("X-Next-Token", "next-page-token")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SnapshotInfo{
+			{Names: []string{}, SnapshotID: "snap1:default"},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSnapshots(context.Background(),
+		WithSnapshotSandboxID("sbx-123"),
+		WithSnapshotLimit(5),
+		WithSnapshotNextToken("abc123"),
+	)
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(result.Snapshots) != 1 {
+		t.Fatalf("len = %d, want 1", len(result.Snapshots))
+	}
+	if result.NextToken != "next-page-token" {
+		t.Errorf("NextToken = %q, want %q", result.NextToken, "next-page-token")
+	}
+}
+
+func TestListSnapshotsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(result.Snapshots) != 0 {
+		t.Errorf("len = %d, want 0", len(result.Snapshots))
+	}
+}
+
+func TestListSnapshotsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSnapshots(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestListSnapshotsInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSnapshots(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestListSnapshotsCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.ListSnapshots(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}

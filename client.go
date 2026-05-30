@@ -149,3 +149,82 @@ func (c *Client) ListSandboxes(ctx context.Context) ([]SandboxInfo, error) {
 
 	return items, nil
 }
+
+type listSnapshotsParams struct {
+	sandboxID string
+	limit     int
+	nextToken string
+}
+
+// ListSnapshotsOption configures a ListSnapshots request.
+type ListSnapshotsOption func(*listSnapshotsParams)
+
+// WithSnapshotSandboxID filters snapshots by the source sandbox ID.
+func WithSnapshotSandboxID(id string) ListSnapshotsOption {
+	return func(p *listSnapshotsParams) { p.sandboxID = id }
+}
+
+// WithSnapshotLimit sets the maximum number of snapshots to return (default 100).
+func WithSnapshotLimit(n int) ListSnapshotsOption {
+	return func(p *listSnapshotsParams) { p.limit = n }
+}
+
+// WithSnapshotNextToken sets the pagination token from a previous ListSnapshotsResult.
+func WithSnapshotNextToken(token string) ListSnapshotsOption {
+	return func(p *listSnapshotsParams) { p.nextToken = token }
+}
+
+// ListSnapshotsResult holds the result of a ListSnapshots call, including pagination.
+type ListSnapshotsResult struct {
+	Snapshots []SnapshotInfo
+	NextToken string
+}
+
+// ListSnapshots returns snapshots for this client's API key.
+func (c *Client) ListSnapshots(ctx context.Context, opts ...ListSnapshotsOption) (*ListSnapshotsResult, error) {
+	var p listSnapshotsParams
+	for _, o := range opts {
+		o(&p)
+	}
+
+	u := c.apiBaseURL + "/snapshots"
+	sep := '?'
+	if p.sandboxID != "" {
+		u += string(sep) + "sandboxID=" + p.sandboxID
+		sep = '&'
+	}
+	if p.limit > 0 {
+		u += string(sep) + "limit=" + fmt.Sprintf("%d", p.limit)
+		sep = '&'
+	}
+	if p.nextToken != "" {
+		u += string(sep) + "nextToken=" + p.nextToken
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build list snapshots request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send list snapshots request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var snapshots []SnapshotInfo
+	if err := json.NewDecoder(resp.Body).Decode(&snapshots); err != nil {
+		return nil, fmt.Errorf("e2b: decode list snapshots response: %w", err)
+	}
+
+	return &ListSnapshotsResult{
+		Snapshots: snapshots,
+		NextToken: resp.Header.Get("X-Next-Token"),
+	}, nil
+}
