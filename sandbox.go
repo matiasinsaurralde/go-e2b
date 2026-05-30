@@ -398,3 +398,55 @@ func (s *Sandbox) LogsWithContext(ctx context.Context, opts ...LogsOption) ([]Sa
 
 	return lr.Logs, nil
 }
+
+// SnapshotInfo holds information about a sandbox snapshot.
+type SnapshotInfo struct {
+	Names      []string `json:"names"`
+	SnapshotID string   `json:"snapshotID"`
+}
+
+type createSnapshotRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+// CreateSnapshot creates a snapshot of the sandbox's current state.
+// An optional name can be provided; if omitted, the API generates an ID.
+func (s *Sandbox) CreateSnapshot(ctx context.Context, name ...string) (*SnapshotInfo, error) {
+	var reqBody createSnapshotRequest
+	if len(name) > 0 {
+		reqBody.Name = name[0]
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: marshal snapshot request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/snapshots", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build snapshot request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send snapshot request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &SandboxNotFoundError{SandboxID: s.ID}
+		}
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var info SnapshotInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("e2b: decode snapshot response: %w", err)
+	}
+
+	return &info, nil
+}
