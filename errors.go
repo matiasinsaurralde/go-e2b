@@ -48,3 +48,13 @@ type FileNotFoundError struct {
 func (e *FileNotFoundError) Error() string {
 	return fmt.Sprintf("e2b: file not found: %s", e.Path)
 }
+
+// TemplateNotFoundError is returned when a template cannot be found.
+type TemplateNotFoundError struct {
+	TemplateID string
+}
+
+// Error implements the error interface.
+func (e *TemplateNotFoundError) Error() string {
+	return fmt.Sprintf("e2b: template not found: %s", e.TemplateID)
+}
