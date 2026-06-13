@@ -188,12 +188,7 @@ func (c *Client) ListTemplates(ctx context.Context) ([]TemplateDetail, error) {
 // CreateTemplate registers a new template and allocates a build ID.
 // This is phase 1 of the build workflow — the build has not started yet.
 func (c *Client) CreateTemplate(ctx context.Context, cfg CreateTemplateConfig) (*TemplateInfo, error) {
-	body, err := json.Marshal(createTemplateRequest{
-		Name:     cfg.Name,
-		Tags:     cfg.Tags,
-		CPUCount: cfg.CPUCount,
-		MemoryMB: cfg.MemoryMB,
-	})
+	body, err := json.Marshal(createTemplateRequest(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("e2b: marshal create template request: %w", err)
 	}
