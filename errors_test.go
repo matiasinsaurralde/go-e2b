@@ -39,3 +39,57 @@ func TestTimeoutError(t *testing.T) {
 		t.Errorf("Error() = %q, want message", got)
 	}
 }
+
+func TestTemplateBuildErrorWithStep(t *testing.T) {
+	e := &TemplateBuildError{
+		TemplateID: "tmpl-abc",
+		BuildID:    "build-123",
+		Reason: BuildStatusReason{
+			Message: "command exited with code 1",
+			Step:    "run",
+		},
+	}
+	got := e.Error()
+	want := "e2b: template build failed: command exited with code 1 (step: run)"
+	if got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestTemplateBuildErrorWithoutStep(t *testing.T) {
+	e := &TemplateBuildError{
+		TemplateID: "tmpl-abc",
+		BuildID:    "build-123",
+		Reason: BuildStatusReason{
+			Message: "internal server error",
+		},
+	}
+	got := e.Error()
+	want := "e2b: template build failed: internal server error"
+	if got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestTemplateBuildErrorFields(t *testing.T) {
+	e := &TemplateBuildError{
+		TemplateID: "tmpl-xyz",
+		BuildID:    "build-456",
+		Reason: BuildStatusReason{
+			Message: "image not found",
+			Step:    "pull",
+			LogEntries: []BuildLogEntry{
+				{Timestamp: "2026-06-17T10:00:00Z", Message: "pulling image", Level: "error"},
+			},
+		},
+	}
+	if e.TemplateID != "tmpl-xyz" {
+		t.Errorf("TemplateID = %q, want %q", e.TemplateID, "tmpl-xyz")
+	}
+	if e.BuildID != "build-456" {
+		t.Errorf("BuildID = %q, want %q", e.BuildID, "build-456")
+	}
+	if len(e.Reason.LogEntries) != 1 {
+		t.Errorf("len(Reason.LogEntries) = %d, want 1", len(e.Reason.LogEntries))
+	}
+}
