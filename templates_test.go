@@ -1209,3 +1209,212 @@ func TestStartTemplateBuildCanceled(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GetBuildStatus
+// ---------------------------------------------------------------------------
+
+func TestGetBuildStatusBuilding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/templates/tmpl-abc/builds/build-123/status" {
+			t.Errorf("path = %s, want /templates/tmpl-abc/builds/build-123/status", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(BuildStatus{
+			TemplateID: "tmpl-abc",
+			BuildID:    "build-123",
+			Status:     "building",
+			Logs:       []string{"Step 1: pulling image", "Step 2: running commands"},
+			LogEntries: []BuildLogEntry{
+				{Timestamp: "2026-06-17T10:00:00Z", Message: "pulling image", Level: "info"},
+				{Timestamp: "2026-06-17T10:00:01Z", Message: "running commands", Level: "info"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, err := client.GetBuildStatus(context.Background(), "tmpl-abc", "build-123")
+	if err != nil {
+		t.Fatalf("GetBuildStatus: %v", err)
+	}
+	if status.Status != "building" {
+		t.Errorf("Status = %q, want %q", status.Status, "building")
+	}
+	if status.TemplateID != "tmpl-abc" {
+		t.Errorf("TemplateID = %q, want %q", status.TemplateID, "tmpl-abc")
+	}
+	if len(status.Logs) != 2 {
+		t.Errorf("len(Logs) = %d, want 2", len(status.Logs))
+	}
+	if len(status.LogEntries) != 2 {
+		t.Errorf("len(LogEntries) = %d, want 2", len(status.LogEntries))
+	}
+	if status.Reason != nil {
+		t.Errorf("Reason = %v, want nil", status.Reason)
+	}
+}
+
+func TestGetBuildStatusReady(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(BuildStatus{
+			TemplateID: "tmpl-abc",
+			BuildID:    "build-123",
+			Status:     "ready",
+			Logs:       []string{},
+			LogEntries: []BuildLogEntry{},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, err := client.GetBuildStatus(context.Background(), "tmpl-abc", "build-123")
+	if err != nil {
+		t.Fatalf("GetBuildStatus: %v", err)
+	}
+	if status.Status != "ready" {
+		t.Errorf("Status = %q, want %q", status.Status, "ready")
+	}
+}
+
+func TestGetBuildStatusError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(BuildStatus{
+			TemplateID: "tmpl-abc",
+			BuildID:    "build-123",
+			Status:     "error",
+			Logs:       []string{"failed to pull image"},
+			LogEntries: []BuildLogEntry{
+				{Timestamp: "2026-06-17T10:00:00Z", Message: "failed to pull image", Level: "error"},
+			},
+			Reason: &BuildStatusReason{
+				Message: "image not found",
+				Step:    "pull",
+				LogEntries: []BuildLogEntry{
+					{Timestamp: "2026-06-17T10:00:00Z", Message: "failed to pull image", Level: "error"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, err := client.GetBuildStatus(context.Background(), "tmpl-abc", "build-123")
+	if err != nil {
+		t.Fatalf("GetBuildStatus: %v", err)
+	}
+	if status.Status != "error" {
+		t.Errorf("Status = %q, want %q", status.Status, "error")
+	}
+	if status.Reason == nil {
+		t.Fatal("Reason is nil, want non-nil")
+	}
+	if status.Reason.Message != "image not found" {
+		t.Errorf("Reason.Message = %q, want %q", status.Reason.Message, "image not found")
+	}
+	if status.Reason.Step != "pull" {
+		t.Errorf("Reason.Step = %q, want %q", status.Reason.Step, "pull")
+	}
+}
+
+func TestGetBuildStatusWithLogsOffset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("logsOffset"); got != "50" {
+			t.Errorf("logsOffset = %q, want %q", got, "50")
+		}
+		if got := q.Get("limit"); got != "5" {
+			t.Errorf("limit = %q, want %q", got, "5")
+		}
+		if got := q.Get("level"); got != "warn" {
+			t.Errorf("level = %q, want %q", got, "warn")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(BuildStatus{
+			TemplateID: "tmpl-abc",
+			BuildID:    "build-123",
+			Status:     "building",
+			Logs:       []string{},
+			LogEntries: []BuildLogEntry{},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.GetBuildStatus(context.Background(), "tmpl-abc", "build-123",
+		WithBuildStatusLogsOffset(50),
+		WithBuildStatusLimit(5),
+		WithBuildStatusLevel("warn"),
+	)
+	if err != nil {
+		t.Fatalf("GetBuildStatus: %v", err)
+	}
+}
+
+func TestGetBuildStatusNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.GetBuildStatus(context.Background(), "tmpl-missing", "build-123")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var nfe *TemplateNotFoundError
+	if !errors.As(err, &nfe) {
+		t.Fatalf("expected TemplateNotFoundError, got %T: %v", err, err)
+	}
+}
+
+func TestGetBuildStatusCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(BuildStatus{Status: "building"})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.GetBuildStatus(ctx, "tmpl-abc", "build-123")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}

@@ -304,6 +304,97 @@ func (c *Client) StartTemplateBuild(ctx context.Context, templateID, buildID str
 	return nil
 }
 
+// BuildStatusReason holds error details when a build fails.
+type BuildStatusReason struct {
+	Message    string          `json:"message"`
+	Step       string          `json:"step,omitempty"`
+	LogEntries []BuildLogEntry `json:"logEntries,omitempty"`
+}
+
+// BuildStatus holds the current status of a template build.
+type BuildStatus struct {
+	TemplateID string             `json:"templateID"`
+	BuildID    string             `json:"buildID"`
+	Status     string             `json:"status"` // "waiting", "building", "ready", "error"
+	Logs       []string           `json:"logs"`
+	LogEntries []BuildLogEntry    `json:"logEntries"`
+	Reason     *BuildStatusReason `json:"reason,omitempty"`
+}
+
+// BuildStatusOption configures a GetBuildStatus request.
+type BuildStatusOption func(*buildStatusOptions)
+
+type buildStatusOptions struct {
+	logsOffset int
+	limit      int
+	level      string
+}
+
+// WithBuildStatusLogsOffset sets the starting log index for incremental retrieval.
+func WithBuildStatusLogsOffset(offset int) BuildStatusOption {
+	return func(o *buildStatusOptions) { o.logsOffset = offset }
+}
+
+// WithBuildStatusLimit sets the maximum number of log entries (0-100, default 100).
+func WithBuildStatusLimit(n int) BuildStatusOption {
+	return func(o *buildStatusOptions) { o.limit = n }
+}
+
+// WithBuildStatusLevel filters logs by minimum severity: "debug", "info", "warn", or "error".
+func WithBuildStatusLevel(level string) BuildStatusOption {
+	return func(o *buildStatusOptions) { o.level = level }
+}
+
+// GetBuildStatus retrieves the current status of a template build, including logs.
+// Poll this method until Status is "ready" or "error".
+func (c *Client) GetBuildStatus(ctx context.Context, templateID, buildID string, opts ...BuildStatusOption) (*BuildStatus, error) {
+	var o buildStatusOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+
+	u := c.apiBaseURL + "/templates/" + templateID + "/builds/" + buildID + "/status"
+	sep := '?'
+	if o.logsOffset > 0 {
+		u += string(sep) + "logsOffset=" + fmt.Sprintf("%d", o.logsOffset)
+		sep = '&'
+	}
+	if o.limit > 0 {
+		u += string(sep) + "limit=" + fmt.Sprintf("%d", o.limit)
+		sep = '&'
+	}
+	if o.level != "" {
+		u += string(sep) + "level=" + o.level
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build get build status request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send get build status request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &TemplateNotFoundError{TemplateID: templateID}
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var status BuildStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("e2b: decode build status response: %w", err)
+	}
+
+	return &status, nil
+}
+
 // ListTemplates returns all templates for this client's API key.
 func (c *Client) ListTemplates(ctx context.Context) ([]TemplateDetail, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+"/templates", nil)
