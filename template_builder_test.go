@@ -1,7 +1,14 @@
 package e2b
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -366,5 +373,397 @@ func TestMultipleCopySteps(t *testing.T) {
 	}
 	if b.fileBundles[1].step != 1 {
 		t.Errorf("fileBundles[1].step = %d, want 1", b.fileBundles[1].step)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Build() / BuildInBackground() tests
+// ---------------------------------------------------------------------------
+
+// buildMockServer creates a mock HTTP server that simulates the full build workflow.
+// It tracks which endpoints were called via the returned callLog.
+func buildMockServer(t *testing.T, opts buildMockOpts) (*httptest.Server, *buildCallLog) {
+	t.Helper()
+	log := &buildCallLog{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Phase 1: POST /v3/templates → create template
+		if r.Method == http.MethodPost && path == "/v3/templates" {
+			log.mu.Lock()
+			log.createCalled = true
+			log.mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(TemplateInfo{
+				TemplateID: "tmpl-mock",
+				BuildID:    "build-mock",
+				Names:      []string{"test-template"},
+				Public:     false,
+			})
+			return
+		}
+
+		// Phase 2a: GET /templates/{id}/files/{hash} → check files
+		if r.Method == http.MethodGet && strings.HasPrefix(path, "/templates/tmpl-mock/files/") {
+			log.mu.Lock()
+			log.checkFilesCalled = true
+			log.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			present := opts.filesCached
+			resp := BuildFileStatus{Present: present}
+			if !present {
+				resp.URL = fmt.Sprintf("http://%s/upload", r.Host)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Phase 2b: PUT /upload → upload files
+		if r.Method == http.MethodPut && path == "/upload" {
+			log.mu.Lock()
+			log.uploadCalled = true
+			log.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Phase 3: POST /v2/templates/{id}/builds/{buildID} → start build
+		if r.Method == http.MethodPost && path == "/v2/templates/tmpl-mock/builds/build-mock" {
+			log.mu.Lock()
+			log.startCalled = true
+			// Capture the StartBuildConfig for assertions.
+			var cfg StartBuildConfig
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err == nil {
+				log.startConfig = cfg
+			}
+			log.mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+
+		// Phase 4: GET /templates/{id}/builds/{buildID}/status → poll
+		if r.Method == http.MethodGet && strings.HasPrefix(path, "/templates/tmpl-mock/builds/build-mock/status") {
+			count := log.pollCount.Add(1)
+			status := "building"
+			var reason *BuildStatusReason
+			var logEntries []BuildLogEntry
+
+			if opts.buildError && count >= int64(opts.readyAfterPolls) {
+				status = "error"
+				reason = &BuildStatusReason{Message: "command failed", Step: "run"}
+			} else if count >= int64(opts.readyAfterPolls) {
+				status = "ready"
+			}
+
+			// Return some log entries on each poll (except drain polls).
+			if count <= int64(opts.readyAfterPolls) {
+				logEntries = []BuildLogEntry{
+					{Timestamp: fmt.Sprintf("2026-01-01T00:00:%02dZ", count), Message: fmt.Sprintf("log-%d", count), Level: "info"},
+				}
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(BuildStatus{
+				TemplateID: "tmpl-mock",
+				BuildID:    "build-mock",
+				Status:     status,
+				LogEntries: logEntries,
+				Reason:     reason,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+
+	return srv, log
+}
+
+type buildMockOpts struct {
+	filesCached    bool
+	readyAfterPolls int // poll count at which to return ready/error
+	buildError     bool
+}
+
+type buildCallLog struct {
+	mu              sync.Mutex
+	createCalled    bool
+	checkFilesCalled bool
+	uploadCalled    bool
+	startCalled     bool
+	startConfig     StartBuildConfig
+	pollCount       atomic.Int64
+}
+
+func TestBuildFullLifecycle(t *testing.T) {
+	srv, log := buildMockServer(t, buildMockOpts{readyAfterPolls: 2})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	b := NewTemplate().
+		FromImage("python:3.11").
+		RunCmd("echo hello").
+		SetStartCmd("python app.py")
+
+	result, err := b.Build(context.Background(), client, BuildConfig{Name: "test-template"})
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	if result.TemplateID != "tmpl-mock" {
+		t.Errorf("TemplateID = %q, want %q", result.TemplateID, "tmpl-mock")
+	}
+	if result.BuildID != "build-mock" {
+		t.Errorf("BuildID = %q, want %q", result.BuildID, "build-mock")
+	}
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if !log.createCalled {
+		t.Error("CreateTemplate was not called")
+	}
+	if !log.startCalled {
+		t.Error("StartTemplateBuild was not called")
+	}
+	if log.startConfig.FromImage != "python:3.11" {
+		t.Errorf("StartConfig.FromImage = %q, want %q", log.startConfig.FromImage, "python:3.11")
+	}
+}
+
+func TestBuildSkipCacheSetsForce(t *testing.T) {
+	srv, log := buildMockServer(t, buildMockOpts{readyAfterPolls: 1})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	b := NewTemplate().FromImage("python:3.11").RunCmd("echo hi")
+	_, err := b.Build(context.Background(), client, BuildConfig{
+		Name:      "test",
+		SkipCache: true,
+	})
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if !log.startConfig.Force {
+		t.Error("StartConfig.Force = false, want true when SkipCache is set")
+	}
+}
+
+func TestBuildFileUpload(t *testing.T) {
+	srv, log := buildMockServer(t, buildMockOpts{filesCached: false, readyAfterPolls: 1})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	// Create a temp file so Copy has something to hash.
+	b := NewTemplate().
+		FromImage("python:3.11").
+		Copy("template_builder.go", "/app/template_builder.go")
+
+	_, err := b.Build(context.Background(), client, BuildConfig{Name: "test"})
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if !log.checkFilesCalled {
+		t.Error("CheckBuildFiles was not called")
+	}
+	if !log.uploadCalled {
+		t.Error("UploadBuildFiles was not called (files not cached)")
+	}
+	// Verify FilesHash was set on the copy step (index 0, since FromImage doesn't add a step).
+	if b.steps[0].FilesHash == "" {
+		t.Error("copy step FilesHash is empty, should be populated")
+	}
+}
+
+func TestBuildFileCached(t *testing.T) {
+	srv, log := buildMockServer(t, buildMockOpts{filesCached: true, readyAfterPolls: 1})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	b := NewTemplate().
+		FromImage("python:3.11").
+		Copy("template_builder.go", "/app/template_builder.go")
+
+	_, err := b.Build(context.Background(), client, BuildConfig{Name: "test"})
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if !log.checkFilesCalled {
+		t.Error("CheckBuildFiles was not called")
+	}
+	if log.uploadCalled {
+		t.Error("UploadBuildFiles was called but files should be cached")
+	}
+}
+
+func TestBuildStatusError(t *testing.T) {
+	srv, _ := buildMockServer(t, buildMockOpts{readyAfterPolls: 1, buildError: true})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	b := NewTemplate().FromImage("python:3.11").RunCmd("exit 1")
+	_, err := b.Build(context.Background(), client, BuildConfig{Name: "test"})
+	if err == nil {
+		t.Fatal("Build() expected error, got nil")
+	}
+
+	var buildErr *TemplateBuildError
+	ok := false
+	if e, is := err.(*TemplateBuildError); is {
+		buildErr = e
+		ok = true
+	}
+	if !ok {
+		t.Fatalf("error type = %T, want *TemplateBuildError", err)
+	}
+	if buildErr.TemplateID != "tmpl-mock" {
+		t.Errorf("TemplateID = %q, want %q", buildErr.TemplateID, "tmpl-mock")
+	}
+	if buildErr.Reason.Message != "command failed" {
+		t.Errorf("Reason.Message = %q, want %q", buildErr.Reason.Message, "command failed")
+	}
+	if buildErr.Reason.Step != "run" {
+		t.Errorf("Reason.Step = %q, want %q", buildErr.Reason.Step, "run")
+	}
+}
+
+func TestBuildContextCanceled(t *testing.T) {
+	// Server that always returns "building" so we rely on context cancel.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if r.Method == http.MethodPost && path == "/v3/templates" {
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(TemplateInfo{
+				TemplateID: "tmpl-mock", BuildID: "build-mock",
+				Names: []string{"test"}, Public: false,
+			})
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(path, "/v2/templates/") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if r.Method == http.MethodGet && strings.Contains(path, "/status") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(BuildStatus{
+				TemplateID: "tmpl-mock", BuildID: "build-mock",
+				Status: "building",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel immediately so the poll loop exits.
+	cancel()
+
+	b := NewTemplate().FromImage("python:3.11").RunCmd("echo hi")
+	_, err := b.Build(ctx, client, BuildConfig{Name: "test"})
+	if err == nil {
+		t.Fatal("Build() expected error from canceled context, got nil")
+	}
+}
+
+func TestBuildOnLogCallback(t *testing.T) {
+	srv, _ := buildMockServer(t, buildMockOpts{readyAfterPolls: 3})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	var mu sync.Mutex
+	var received []string
+
+	b := NewTemplate().FromImage("python:3.11").RunCmd("echo hi")
+	_, err := b.Build(context.Background(), client, BuildConfig{
+		Name: "test",
+		OnLog: func(entry BuildLogEntry) {
+			mu.Lock()
+			received = append(received, entry.Message)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build() error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The mock returns 1 log entry per poll for readyAfterPolls=3, so we get 3 entries.
+	if len(received) < 3 {
+		t.Errorf("OnLog called %d times, want at least 3", len(received))
+	}
+}
+
+func TestBuildInBackground(t *testing.T) {
+	srv, log := buildMockServer(t, buildMockOpts{readyAfterPolls: 5})
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	b := NewTemplate().FromImage("python:3.11").RunCmd("echo hi")
+	result, err := b.BuildInBackground(context.Background(), client, BuildConfig{Name: "test"})
+	if err != nil {
+		t.Fatalf("BuildInBackground() error: %v", err)
+	}
+
+	if result.TemplateID != "tmpl-mock" {
+		t.Errorf("TemplateID = %q, want %q", result.TemplateID, "tmpl-mock")
+	}
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	if !log.createCalled {
+		t.Error("CreateTemplate was not called")
+	}
+	if !log.startCalled {
+		t.Error("StartTemplateBuild was not called")
+	}
+	// No polling should have happened.
+	if count := log.pollCount.Load(); count != 0 {
+		t.Errorf("pollCount = %d, want 0 (BuildInBackground should not poll)", count)
+	}
+}
+
+func TestBuildValidationEmptyName(t *testing.T) {
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: "http://localhost"})
+	b := NewTemplate().FromImage("python:3.11")
+
+	_, err := b.Build(context.Background(), client, BuildConfig{})
+	if err == nil {
+		t.Fatal("Build() expected error for empty name, got nil")
+	}
+	if !strings.Contains(err.Error(), "name is required") {
+		t.Errorf("error = %q, want name-related message", err.Error())
+	}
+}
+
+func TestBuildValidationEmptyNameBackground(t *testing.T) {
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: "http://localhost"})
+	b := NewTemplate().FromImage("python:3.11")
+
+	_, err := b.BuildInBackground(context.Background(), client, BuildConfig{})
+	if err == nil {
+		t.Fatal("BuildInBackground() expected error for empty name, got nil")
+	}
+	if !strings.Contains(err.Error(), "name is required") {
+		t.Errorf("error = %q, want name-related message", err.Error())
 	}
 }

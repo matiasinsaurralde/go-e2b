@@ -1,9 +1,13 @@
 package e2b
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 // TemplateBuilder accumulates build steps for a template using a fluent API.
@@ -24,8 +28,8 @@ type TemplateBuilder struct {
 // The hash and data fields are populated by computeFilesHash during Build().
 type fileBundle struct {
 	step int
-	hash string //nolint:unused // populated by computeFilesHash, read in Build()
-	data []byte //nolint:unused // populated by computeFilesHash, read in Build()
+	hash string // SHA-256 hex hash (populated during Build)
+	data []byte // gzipped tar archive (populated during Build)
 }
 
 // NewTemplate creates a new TemplateBuilder.
@@ -199,4 +203,247 @@ func WaitForFile(path string) string {
 // WaitForTimeout returns a ready-check command that simply sleeps for the given duration.
 func WaitForTimeout(ms int) string {
 	return fmt.Sprintf("sleep %s", fmt.Sprintf("%.1f", float64(ms)/1000.0))
+}
+
+// BuildConfig holds configuration for Build() and BuildInBackground().
+type BuildConfig struct {
+	// Name is the template name (required).
+	Name string
+
+	// Tags are labels to assign to the template build.
+	Tags []string
+
+	// CPUCount is the number of CPU cores for sandbox instances.
+	CPUCount int
+
+	// MemoryMB is the memory in MiB for sandbox instances.
+	MemoryMB int
+
+	// SkipCache forces a full rebuild, ignoring all caches.
+	SkipCache bool
+
+	// OnLog is called for each log entry received during polling.
+	// Only used by Build(), not BuildInBackground().
+	OnLog func(entry BuildLogEntry)
+}
+
+// BuildResult holds the result of a successful template build.
+type BuildResult struct {
+	TemplateID string
+	BuildID    string
+	Names      []string
+	Public     bool
+}
+
+// Build executes the full template build lifecycle synchronously:
+// 1. Create template (allocate build ID)
+// 2. Compute file hashes and upload any uncached file bundles
+// 3. Start the build
+// 4. Poll until "ready" or "error", streaming logs via OnLog
+func (b *TemplateBuilder) Build(ctx context.Context, client *Client, cfg BuildConfig) (*BuildResult, error) {
+	if err := b.validate(cfg); err != nil {
+		return nil, err
+	}
+
+	// Phase 1: Create template.
+	info, err := client.CreateTemplate(ctx, CreateTemplateConfig{
+		Name:     cfg.Name,
+		Tags:     cfg.Tags,
+		CPUCount: cfg.CPUCount,
+		MemoryMB: cfg.MemoryMB,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build create template: %w", err)
+	}
+
+	// Phase 2: Compute file hashes and upload.
+	if err := b.processFileBundles(ctx, client, info.TemplateID); err != nil {
+		return nil, err
+	}
+
+	// Phase 3: Start the build.
+	if err := b.startBuild(ctx, client, info.TemplateID, info.BuildID, cfg); err != nil {
+		return nil, err
+	}
+
+	// Phase 4: Poll until terminal status.
+	if err := b.pollBuild(ctx, client, info.TemplateID, info.BuildID, cfg.OnLog); err != nil {
+		return nil, err
+	}
+
+	return &BuildResult{
+		TemplateID: info.TemplateID,
+		BuildID:    info.BuildID,
+		Names:      info.Names,
+		Public:     info.Public,
+	}, nil
+}
+
+// BuildInBackground executes phases 1-3 (create, upload, start) and returns
+// immediately without polling for completion.
+func (b *TemplateBuilder) BuildInBackground(ctx context.Context, client *Client, cfg BuildConfig) (*BuildResult, error) {
+	if err := b.validate(cfg); err != nil {
+		return nil, err
+	}
+
+	// Phase 1: Create template.
+	info, err := client.CreateTemplate(ctx, CreateTemplateConfig{
+		Name:     cfg.Name,
+		Tags:     cfg.Tags,
+		CPUCount: cfg.CPUCount,
+		MemoryMB: cfg.MemoryMB,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build create template: %w", err)
+	}
+
+	// Phase 2: Compute file hashes and upload.
+	if err := b.processFileBundles(ctx, client, info.TemplateID); err != nil {
+		return nil, err
+	}
+
+	// Phase 3: Start the build.
+	if err := b.startBuild(ctx, client, info.TemplateID, info.BuildID, cfg); err != nil {
+		return nil, err
+	}
+
+	return &BuildResult{
+		TemplateID: info.TemplateID,
+		BuildID:    info.BuildID,
+		Names:      info.Names,
+		Public:     info.Public,
+	}, nil
+}
+
+// validate checks that the builder configuration is valid.
+func (b *TemplateBuilder) validate(cfg BuildConfig) error {
+	if cfg.Name == "" {
+		return &Error{Message: "template name is required in BuildConfig"}
+	}
+	return nil
+}
+
+// processFileBundles computes file hashes and uploads any uncached bundles.
+func (b *TemplateBuilder) processFileBundles(ctx context.Context, client *Client, templateID string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("e2b: get working directory: %w", err)
+	}
+
+	for i := range b.fileBundles {
+		fb := &b.fileBundles[i]
+		src := b.steps[fb.step].Args[0] // copy step's source path
+
+		hash, data, err := computeFilesHash(cwd, src)
+		if err != nil {
+			return fmt.Errorf("e2b: compute files hash for %s: %w", src, err)
+		}
+		fb.hash = hash
+		fb.data = data
+
+		// Set the hash on the corresponding step.
+		b.steps[fb.step].FilesHash = hash
+
+		// Check if already cached.
+		status, err := client.CheckBuildFiles(ctx, templateID, hash)
+		if err != nil {
+			return fmt.Errorf("e2b: check build files: %w", err)
+		}
+
+		if !status.Present {
+			if err := client.UploadBuildFiles(ctx, status.URL, bytes.NewReader(data)); err != nil {
+				return fmt.Errorf("e2b: upload build files: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// startBuild triggers the template build with the configured steps.
+func (b *TemplateBuilder) startBuild(ctx context.Context, client *Client, templateID, buildID string, cfg BuildConfig) error {
+	force := b.force || cfg.SkipCache
+	return client.StartTemplateBuild(ctx, templateID, buildID, StartBuildConfig{
+		FromImage:    b.fromImage,
+		FromTemplate: b.fromTemplate,
+		Force:        force,
+		Steps:        b.steps,
+		StartCmd:     b.startCmd,
+		ReadyCmd:     b.readyCmd,
+	})
+}
+
+// pollBuild polls GetBuildStatus until the build reaches a terminal state.
+// Logs are streamed incrementally via the onLog callback.
+func (b *TemplateBuilder) pollBuild(ctx context.Context, client *Client, templateID, buildID string, onLog func(BuildLogEntry)) error {
+	logsOffset := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("e2b: build poll canceled: %w", err)
+		}
+
+		status, err := client.GetBuildStatus(ctx, templateID, buildID,
+			WithBuildStatusLogsOffset(logsOffset),
+		)
+		if err != nil {
+			return fmt.Errorf("e2b: get build status: %w", err)
+		}
+
+		// Deliver log entries.
+		if onLog != nil {
+			for _, entry := range status.LogEntries {
+				onLog(entry)
+			}
+		}
+		logsOffset += len(status.LogEntries)
+
+		switch status.Status {
+		case "ready":
+			// Drain remaining logs.
+			if err := b.drainLogs(ctx, client, templateID, buildID, logsOffset, onLog); err != nil {
+				return err
+			}
+			return nil
+		case "error":
+			// Drain remaining logs before returning error.
+			_ = b.drainLogs(ctx, client, templateID, buildID, logsOffset, onLog)
+			reason := BuildStatusReason{}
+			if status.Reason != nil {
+				reason = *status.Reason
+			}
+			return &TemplateBuildError{
+				TemplateID: templateID,
+				BuildID:    buildID,
+				Reason:     reason,
+			}
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// drainLogs fetches any remaining log entries after a terminal status.
+func (b *TemplateBuilder) drainLogs(ctx context.Context, client *Client, templateID, buildID string, offset int, onLog func(BuildLogEntry)) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("e2b: drain logs canceled: %w", err)
+		}
+
+		status, err := client.GetBuildStatus(ctx, templateID, buildID,
+			WithBuildStatusLogsOffset(offset),
+		)
+		if err != nil {
+			return fmt.Errorf("e2b: drain logs: %w", err)
+		}
+
+		if len(status.LogEntries) == 0 {
+			return nil
+		}
+
+		if onLog != nil {
+			for _, entry := range status.LogEntries {
+				onLog(entry)
+			}
+		}
+		offset += len(status.LogEntries)
+	}
 }
