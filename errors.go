@@ -58,3 +58,18 @@ type TemplateNotFoundError struct {
 func (e *TemplateNotFoundError) Error() string {
 	return fmt.Sprintf("e2b: template not found: %s", e.TemplateID)
 }
+
+// TemplateBuildError is returned when a template build finishes with "error" status.
+type TemplateBuildError struct {
+	TemplateID string
+	BuildID    string
+	Reason     BuildStatusReason
+}
+
+// Error implements the error interface.
+func (e *TemplateBuildError) Error() string {
+	if e.Reason.Step != "" {
+		return fmt.Sprintf("e2b: template build failed: %s (step: %s)", e.Reason.Message, e.Reason.Step)
+	}
+	return fmt.Sprintf("e2b: template build failed: %s", e.Reason.Message)
+}
