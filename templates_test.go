@@ -1,9 +1,11 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -813,5 +815,224 @@ func TestTemplateNotFoundErrorMessage(t *testing.T) {
 	want := "e2b: template not found: tmpl-123"
 	if got := err.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckBuildFiles
+// ---------------------------------------------------------------------------
+
+func TestCheckBuildFilesPresent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/templates/tmpl-abc/files/abc123hash" {
+			t.Errorf("path = %s, want /templates/tmpl-abc/files/abc123hash", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(BuildFileStatus{Present: true})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, err := client.CheckBuildFiles(context.Background(), "tmpl-abc", "abc123hash")
+	if err != nil {
+		t.Fatalf("CheckBuildFiles: %v", err)
+	}
+	if !status.Present {
+		t.Error("Present = false, want true")
+	}
+	if status.URL != "" {
+		t.Errorf("URL = %q, want empty", status.URL)
+	}
+}
+
+func TestCheckBuildFilesNotPresent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(BuildFileStatus{
+			Present: false,
+			URL:     "https://storage.example.com/upload?token=xyz",
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, err := client.CheckBuildFiles(context.Background(), "tmpl-abc", "somehash")
+	if err != nil {
+		t.Fatalf("CheckBuildFiles: %v", err)
+	}
+	if status.Present {
+		t.Error("Present = true, want false")
+	}
+	if status.URL != "https://storage.example.com/upload?token=xyz" {
+		t.Errorf("URL = %q, want presigned URL", status.URL)
+	}
+}
+
+func TestCheckBuildFilesNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.CheckBuildFiles(context.Background(), "tmpl-missing", "somehash")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var nfe *TemplateNotFoundError
+	if !errors.As(err, &nfe) {
+		t.Fatalf("expected TemplateNotFoundError, got %T: %v", err, err)
+	}
+	if nfe.TemplateID != "tmpl-missing" {
+		t.Errorf("TemplateID = %q, want %q", nfe.TemplateID, "tmpl-missing")
+	}
+}
+
+func TestCheckBuildFilesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("invalid hash format"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.CheckBuildFiles(context.Background(), "tmpl-abc", "badhash")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestCheckBuildFilesCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(BuildFileStatus{Present: true})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.CheckBuildFiles(ctx, "tmpl-abc", "somehash")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UploadBuildFiles
+// ---------------------------------------------------------------------------
+
+func TestUploadBuildFilesSuccess(t *testing.T) {
+	payload := []byte("fake-tar-gz-content")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("method = %s, want PUT", r.Method)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Equal(body, payload) {
+			t.Errorf("body = %q, want %q", body, payload)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: "https://unused.example.com"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.UploadBuildFiles(context.Background(), srv.URL+"/upload", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("UploadBuildFiles: %v", err)
+	}
+}
+
+func TestUploadBuildFilesServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("expired presigned URL"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: "https://unused.example.com"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.UploadBuildFiles(context.Background(), srv.URL+"/upload", bytes.NewReader([]byte("data")))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusForbidden {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestUploadBuildFilesNoAuthHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-API-Key"); got != "" {
+			t.Errorf("X-API-Key = %q, want empty (presigned URL should not have auth header)", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("Content-Type = %q, want empty", got)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "secret-key", APIBaseURL: "https://unused.example.com"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.UploadBuildFiles(context.Background(), srv.URL+"/upload", bytes.NewReader([]byte("data")))
+	if err != nil {
+		t.Fatalf("UploadBuildFiles: %v", err)
 	}
 }
