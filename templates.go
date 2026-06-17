@@ -224,6 +224,86 @@ func (c *Client) UploadBuildFiles(ctx context.Context, url string, data io.Reade
 	return nil
 }
 
+// TemplateStep describes a single build step in a template build.
+type TemplateStep struct {
+	// Type is the step type: "run", "copy", "env", "workdir", or "user".
+	Type string `json:"type"`
+
+	// Args holds the arguments for the step.
+	Args []string `json:"args,omitempty"`
+
+	// FilesHash is the SHA-256 hash of the file bundle for "copy" steps.
+	FilesHash string `json:"filesHash,omitempty"`
+
+	// Force skips the cache for this individual step.
+	Force bool `json:"force,omitempty"`
+}
+
+// ImageRegistry holds credentials for a private container registry.
+// Set Type to "aws", "gcp", or "general" and populate the corresponding fields.
+type ImageRegistry struct {
+	Type               string `json:"type"`
+	AWSAccessKeyID     string `json:"awsAccessKeyId,omitempty"`
+	AWSSecretAccessKey string `json:"awsSecretAccessKey,omitempty"`
+	AWSRegion          string `json:"awsRegion,omitempty"`
+	ServiceAccountJSON string `json:"serviceAccountJson,omitempty"`
+	Username           string `json:"username,omitempty"`
+	Password           string `json:"password,omitempty"`
+}
+
+// StartBuildConfig holds the configuration for starting a template build.
+type StartBuildConfig struct {
+	// FromImage is the base Docker image (e.g. "python:3.11"). Mutually exclusive with FromTemplate.
+	FromImage string `json:"fromImage,omitempty"`
+
+	// FromTemplate is the base E2B template ID. Mutually exclusive with FromImage.
+	FromTemplate string `json:"fromTemplate,omitempty"`
+
+	// FromImageRegistry holds registry auth for private base images.
+	FromImageRegistry *ImageRegistry `json:"fromImageRegistry,omitempty"`
+
+	// Force skips the build cache for all steps.
+	Force bool `json:"force,omitempty"`
+
+	// Steps is the ordered list of build steps.
+	Steps []TemplateStep `json:"steps"`
+
+	// StartCmd is the command to run when a sandbox starts from this template.
+	StartCmd string `json:"startCmd,omitempty"`
+
+	// ReadyCmd is a health-check command that must exit 0 to indicate readiness.
+	ReadyCmd string `json:"readyCmd,omitempty"`
+}
+
+// StartTemplateBuild triggers a template build. The buildID comes from CreateTemplate.
+// This is phase 2 of the build workflow — after files have been uploaded.
+func (c *Client) StartTemplateBuild(ctx context.Context, templateID, buildID string, cfg StartBuildConfig) error {
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("e2b: marshal start build request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBaseURL+"/v2/templates/"+templateID+"/builds/"+buildID, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("e2b: build start build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send start build request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	return nil
+}
+
 // ListTemplates returns all templates for this client's API key.
 func (c *Client) ListTemplates(ctx context.Context) ([]TemplateDetail, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+"/templates", nil)

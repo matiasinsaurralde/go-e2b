@@ -1036,3 +1036,176 @@ func TestUploadBuildFilesNoAuthHeader(t *testing.T) {
 		t.Fatalf("UploadBuildFiles: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// StartTemplateBuild
+// ---------------------------------------------------------------------------
+
+func TestStartTemplateBuildSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/v2/templates/tmpl-abc/builds/build-123" {
+			t.Errorf("path = %s, want /v2/templates/tmpl-abc/builds/build-123", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", got, "application/json")
+		}
+
+		var body StartBuildConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.FromImage != "python:3.11-slim" {
+			t.Errorf("FromImage = %q, want %q", body.FromImage, "python:3.11-slim")
+		}
+		if len(body.Steps) != 1 {
+			t.Fatalf("len(Steps) = %d, want 1", len(body.Steps))
+		}
+		if body.Steps[0].Type != "run" {
+			t.Errorf("Steps[0].Type = %q, want %q", body.Steps[0].Type, "run")
+		}
+		if len(body.Steps[0].Args) != 1 || body.Steps[0].Args[0] != "pip install requests" {
+			t.Errorf("Steps[0].Args = %v, want [pip install requests]", body.Steps[0].Args)
+		}
+		if body.StartCmd != "echo hello" {
+			t.Errorf("StartCmd = %q, want %q", body.StartCmd, "echo hello")
+		}
+
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.StartTemplateBuild(context.Background(), "tmpl-abc", "build-123", StartBuildConfig{
+		FromImage: "python:3.11-slim",
+		Steps: []TemplateStep{
+			{Type: "run", Args: []string{"pip install requests"}},
+		},
+		StartCmd: "echo hello",
+	})
+	if err != nil {
+		t.Fatalf("StartTemplateBuild: %v", err)
+	}
+}
+
+func TestStartTemplateBuildWithForce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body StartBuildConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if !body.Force {
+			t.Error("Force = false, want true")
+		}
+		if len(body.Steps) != 1 || !body.Steps[0].Force {
+			t.Error("Steps[0].Force = false, want true")
+		}
+
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.StartTemplateBuild(context.Background(), "tmpl-abc", "build-123", StartBuildConfig{
+		FromImage: "ubuntu:22.04",
+		Force:     true,
+		Steps: []TemplateStep{
+			{Type: "run", Args: []string{"apt-get update"}, Force: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartTemplateBuild: %v", err)
+	}
+}
+
+func TestStartTemplateBuildAlreadyTriggered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":400,"message":"build is not in waiting state"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.StartTemplateBuild(context.Background(), "tmpl-abc", "build-123", StartBuildConfig{
+		FromImage: "python:3.11",
+		Steps:     []TemplateStep{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestStartTemplateBuildServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = client.StartTemplateBuild(context.Background(), "tmpl-abc", "build-123", StartBuildConfig{
+		FromImage: "python:3.11",
+		Steps:     []TemplateStep{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestStartTemplateBuildCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = client.StartTemplateBuild(ctx, "tmpl-abc", "build-123", StartBuildConfig{
+		FromImage: "python:3.11",
+		Steps:     []TemplateStep{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
