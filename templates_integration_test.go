@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 // These tests hit the real E2B API. Run with:
@@ -122,4 +123,83 @@ func TestIntegrationStartTemplateBuild(t *testing.T) {
 		t.Fatal("expected error on second StartTemplateBuild call, got nil")
 	}
 	t.Logf("second call correctly failed: %v", err)
+}
+
+func TestIntegrationGetBuildStatus(t *testing.T) {
+	client := integrationClient(t)
+	ctx := context.Background()
+
+	// Phase 1: Create a fresh template.
+	info, err := client.CreateTemplate(ctx, CreateTemplateConfig{
+		Name: "go-sdk-integration-build-status",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+	t.Logf("created template %s, build %s", info.TemplateID, info.BuildID)
+
+	t.Cleanup(func() {
+		if err := client.DeleteTemplate(context.Background(), info.TemplateID); err != nil {
+			t.Logf("cleanup DeleteTemplate: %v", err)
+		} else {
+			t.Logf("cleaned up template %s", info.TemplateID)
+		}
+	})
+
+	// Before triggering the build, status should be "waiting".
+	status, err := client.GetBuildStatus(ctx, info.TemplateID, info.BuildID)
+	if err != nil {
+		t.Fatalf("GetBuildStatus (waiting): %v", err)
+	}
+	t.Logf("initial status=%q", status.Status)
+	if status.Status != "waiting" {
+		t.Errorf("expected status %q, got %q", "waiting", status.Status)
+	}
+
+	// Phase 2: Start the build.
+	err = client.StartTemplateBuild(ctx, info.TemplateID, info.BuildID, StartBuildConfig{
+		FromImage: "python:3.11-slim",
+		Steps: []TemplateStep{
+			{Type: "run", Args: []string{"echo hello"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartTemplateBuild: %v", err)
+	}
+
+	// Phase 3: Poll until terminal status, with a timeout.
+	deadline := time.After(3 * time.Minute)
+	logsOffset := 0
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for build to complete")
+		default:
+		}
+
+		status, err = client.GetBuildStatus(ctx, info.TemplateID, info.BuildID,
+			WithBuildStatusLogsOffset(logsOffset),
+		)
+		if err != nil {
+			t.Fatalf("GetBuildStatus (poll): %v", err)
+		}
+
+		// Advance offset for incremental log retrieval.
+		logsOffset += len(status.Logs)
+
+		t.Logf("status=%q logs=%d logEntries=%d offset=%d",
+			status.Status, len(status.Logs), len(status.LogEntries), logsOffset)
+
+		if status.Status == "ready" || status.Status == "error" {
+			break
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Logf("final status=%q (total logs seen: %d)", status.Status, logsOffset)
+
+	if status.Status == "error" && status.Reason != nil {
+		t.Logf("build error reason: %s (step: %s)", status.Reason.Message, status.Reason.Step)
+	}
 }
