@@ -158,6 +158,72 @@ func WithBuildLogSource(source string) BuildLogOption {
 	return func(p *buildLogParams) { p.source = source }
 }
 
+// BuildFileStatus holds the response from checking if build files are cached.
+type BuildFileStatus struct {
+	// Present indicates whether the files are already cached server-side.
+	Present bool `json:"present"`
+
+	// URL is the presigned upload URL. Only populated when Present is false.
+	URL string `json:"url,omitempty"`
+}
+
+// CheckBuildFiles checks whether a file bundle (identified by its SHA-256 hash)
+// is already cached on the server. If not cached, the response includes a
+// presigned URL for uploading the tar archive.
+func (c *Client) CheckBuildFiles(ctx context.Context, templateID, hash string) (*BuildFileStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+"/templates/"+templateID+"/files/"+hash, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build check files request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send check files request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &TemplateNotFoundError{TemplateID: templateID}
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var status BuildFileStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("e2b: decode check files response: %w", err)
+	}
+
+	return &status, nil
+}
+
+// UploadBuildFiles uploads a gzipped tar archive to the presigned URL returned
+// by CheckBuildFiles. The data parameter should be a *bytes.NewReader (fully
+// buffered) so that Content-Length is set — presigned URLs reject chunked encoding.
+// No authentication headers are sent; the presigned URL contains credentials.
+func (c *Client) UploadBuildFiles(ctx context.Context, url string, data io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, data)
+	if err != nil {
+		return fmt.Errorf("e2b: build upload files request: %w", err)
+	}
+	// No X-API-Key or Content-Type headers — presigned URL has embedded credentials.
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send upload files request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	return nil
+}
+
 // ListTemplates returns all templates for this client's API key.
 func (c *Client) ListTemplates(ctx context.Context) ([]TemplateDetail, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBaseURL+"/templates", nil)
