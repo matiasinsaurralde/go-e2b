@@ -21,8 +21,11 @@ type TemplateBuilder struct {
 }
 
 // fileBundle tracks a copy step that needs file hashing and upload during Build().
+// The hash and data fields are populated by computeFilesHash during Build().
 type fileBundle struct {
-	step int // index into steps
+	step int
+	hash string //nolint:unused // populated by computeFilesHash, read in Build()
+	data []byte //nolint:unused // populated by computeFilesHash, read in Build()
 }
 
 // NewTemplate creates a new TemplateBuilder.
