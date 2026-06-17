@@ -77,3 +77,49 @@ func TestIntegrationCheckBuildFilesNotFound(t *testing.T) {
 	}
 	t.Logf("got expected error: %v", err)
 }
+
+func TestIntegrationStartTemplateBuild(t *testing.T) {
+	client := integrationClient(t)
+	ctx := context.Background()
+
+	// Phase 1: Create a fresh template to get a buildID.
+	info, err := client.CreateTemplate(ctx, CreateTemplateConfig{
+		Name: "go-sdk-integration-start-build",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+	t.Logf("created template %s, build %s", info.TemplateID, info.BuildID)
+
+	// Clean up the template after the test.
+	t.Cleanup(func() {
+		if err := client.DeleteTemplate(context.Background(), info.TemplateID); err != nil {
+			t.Logf("cleanup DeleteTemplate: %v", err)
+		} else {
+			t.Logf("cleaned up template %s", info.TemplateID)
+		}
+	})
+
+	// Phase 2: Start the build with a simple config.
+	err = client.StartTemplateBuild(ctx, info.TemplateID, info.BuildID, StartBuildConfig{
+		FromImage: "python:3.11-slim",
+		Steps: []TemplateStep{
+			{Type: "run", Args: []string{"echo hello from go-sdk"}},
+		},
+		StartCmd: "echo started",
+	})
+	if err != nil {
+		t.Fatalf("StartTemplateBuild: %v", err)
+	}
+	t.Log("StartTemplateBuild succeeded (202 Accepted)")
+
+	// Phase 3: Calling again with the same buildID should fail (build is not in waiting state).
+	err = client.StartTemplateBuild(ctx, info.TemplateID, info.BuildID, StartBuildConfig{
+		FromImage: "python:3.11-slim",
+		Steps:     []TemplateStep{},
+	})
+	if err == nil {
+		t.Fatal("expected error on second StartTemplateBuild call, got nil")
+	}
+	t.Logf("second call correctly failed: %v", err)
+}
