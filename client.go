@@ -79,9 +79,12 @@ func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbo
 	}
 
 	body, err := json.Marshal(createRequest{
-		TemplateID: template,
-		Timeout:    timeout,
-		EnvVars:    cfg.EnvVars,
+		TemplateID:          template,
+		Timeout:             timeout,
+		EnvVars:             cfg.EnvVars,
+		Secure:              cfg.Secure,
+		AllowInternetAccess: cfg.AllowInternetAccess,
+		Network:             cfg.Network,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("e2b: marshal create request: %w", err)
@@ -114,9 +117,10 @@ func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbo
 	}
 
 	sbx := &Sandbox{
-		ID:          cr.SandboxID,
-		accessToken: cr.EnvdAccessToken,
-		client:      c,
+		ID:                 cr.SandboxID,
+		TrafficAccessToken: cr.TrafficAccessToken,
+		accessToken:        cr.EnvdAccessToken,
+		client:             c,
 	}
 	sbx.Commands = newCommandService(sbx)
 	sbx.Filesystem = newFilesystemService(sbx)
