@@ -19,12 +19,33 @@ type SandboxConfig struct {
 
 	// EnvVars are environment variables set in the sandbox.
 	EnvVars map[string]string
+
+	// Secure enables secure envd communication with access tokens.
+	// Required when Network.AllowPublicTraffic is false.
+	// Defaults to true in the official SDKs since v2.0.0.
+	Secure bool
+
+	// AllowInternetAccess controls whether the sandbox can access
+	// the internet. When false, equivalent to DenyOut: ["0.0.0.0/0"].
+	// Defaults to true (server-side).
+	AllowInternetAccess *bool
+
+	// Network configures outbound network access and request transforms.
+	// If nil, the sandbox uses the default network configuration
+	// (all outbound traffic allowed).
+	Network *NetworkConfig
 }
 
 // Sandbox represents a running E2B sandbox microVM.
 type Sandbox struct {
 	// ID is the unique identifier of the sandbox.
 	ID string
+
+	// TrafficAccessToken is set when the sandbox is created with
+	// Secure: true and Network.AllowPublicTraffic: false.
+	// Use it in the "e2b-traffic-access-token" HTTP header to access
+	// sandbox URLs.
+	TrafficAccessToken string
 
 	// Commands provides command execution within the sandbox.
 	Commands *CommandService
@@ -37,14 +58,18 @@ type Sandbox struct {
 }
 
 type createRequest struct {
-	TemplateID string            `json:"templateID"`
-	Timeout    int               `json:"timeout"`
-	EnvVars    map[string]string `json:"envVars,omitempty"`
+	TemplateID          string            `json:"templateID"`
+	Timeout             int               `json:"timeout"`
+	EnvVars             map[string]string `json:"envVars,omitempty"`
+	Secure              bool              `json:"secure,omitempty"`
+	AllowInternetAccess *bool             `json:"allow_internet_access,omitempty"`
+	Network             *NetworkConfig    `json:"network,omitempty"`
 }
 
 type createResponse struct {
-	SandboxID       string `json:"sandboxID"`
-	EnvdAccessToken string `json:"envdAccessToken"`
+	SandboxID          string `json:"sandboxID"`
+	EnvdAccessToken    string `json:"envdAccessToken"`
+	TrafficAccessToken string `json:"trafficAccessToken,omitempty"`
 }
 
 // SandboxLifecycle holds lifecycle configuration for a sandbox.
@@ -74,6 +99,7 @@ type SandboxInfo struct {
 	EnvdVersion  string           `json:"envdVersion,omitempty"`
 	Lifecycle    SandboxLifecycle `json:"lifecycle,omitempty"`
 	VolumeMounts []VolumeMount    `json:"volumeMounts,omitempty"`
+	Network      *NetworkConfig   `json:"network,omitempty"`
 }
 
 // envdBaseURL returns the base URL of the sandbox environment daemon.
@@ -248,6 +274,45 @@ func (s *Sandbox) ResumeWithContext(ctx context.Context, timeoutSeconds int) err
 
 	switch resp.StatusCode {
 	case http.StatusCreated, http.StatusOK, http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		return &SandboxNotFoundError{SandboxID: s.ID}
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+}
+
+// UpdateNetwork replaces the mutable network configuration on a running sandbox.
+// All fields in the update config are optional; omitted fields are cleared
+// on the server. This replaces the entire mutable config, it does not merge.
+// Create-only fields (AllowPublicTraffic, MaskRequestHost) are preserved.
+func (s *Sandbox) UpdateNetwork(cfg NetworkUpdateConfig) error {
+	return s.UpdateNetworkWithContext(context.Background(), cfg)
+}
+
+// UpdateNetworkWithContext replaces the mutable network configuration using the provided context.
+func (s *Sandbox) UpdateNetworkWithContext(ctx context.Context, cfg NetworkUpdateConfig) error {
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("e2b: marshal network update request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/network", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("e2b: build network update request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send network update request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
 		return nil
 	case http.StatusNotFound:
 		return &SandboxNotFoundError{SandboxID: s.ID}
