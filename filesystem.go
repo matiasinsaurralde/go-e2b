@@ -19,6 +19,8 @@ type FileInfo struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Type string `json:"type,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+    ModTime time.Time `json:"-"`
 }
 
 // FilesystemService provides file read and write operations within a sandbox.
@@ -228,3 +230,211 @@ func (f *FilesystemService) fileURL(path, user string) (string, error) {
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
+
+// ===== List — list directory contents =====
+//
+// GET /files?path={path} returns a JSON array of all entries in the directory.
+// response format: [{name, path, type, size, mtime}, ...]
+func (f *FilesystemService) List(ctx context.Context, path string, opts ...ReadOption) ([]FileInfo, error) {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	reqURL, err := f.fileURL(path, rc.user)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build list request: %w", err)
+	}
+	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
+
+	resp, err := f.sandbox.client.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send list request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &FileNotFoundError{Path: path}
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(body)}
+	}
+
+	var raw []struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		Type  string `json:"type,omitempty"`
+		Size  int64  `json:"size,omitempty"`
+		Mtime string `json:"mtime,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("e2b: decode list response: %w", err)
+	}
+	entries := make([]FileInfo, len(raw))
+	for i, r := range raw {
+		entries[i] = FileInfo{
+			Name:    r.Name,
+			Path:    r.Path,
+			Type:    r.Type,
+			Size:    r.Size,
+			ModTime: parseModTime(r.Mtime),
+		}
+	}
+	return entries, nil
+}
+
+// ===== Stat — get single file/dir metadata =====
+//
+// HEAD /files?path={path} returns a single FileInfo.
+// envd returns JSON in the body of the HEAD response, the same format as GET for a single file path.
+func (f *FilesystemService) Stat(ctx context.Context, path string, opts ...ReadOption) (*FileInfo, error) {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	reqURL, err := f.fileURL(path, rc.user)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build stat request: %w", err)
+	}
+	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
+
+	resp, err := f.sandbox.client.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send stat request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &FileNotFoundError{Path: path}
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(body)}
+	}
+
+	var raw struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		Type  string `json:"type,omitempty"`
+		Size  int64  `json:"size,omitempty"`
+		Mtime string `json:"mtime,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("e2b: decode stat response: %w", err)
+	}
+	return &FileInfo{
+		Name:    raw.Name,
+		Path:    raw.Path,
+		Type:    raw.Type,
+		Size:    raw.Size,
+		ModTime: parseModTime(raw.Mtime),
+	}, nil 
+}
+
+// ===== MakeDir — create directory =====
+//
+// POST /files?path={path}&type=directory
+// envd will recursively create parent directories (mkdir -p semantics).
+func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...WriteOption) error {
+	wc := &writeConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyWrite(wc)
+	}
+
+	if wc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wc.timeout)
+		defer cancel()
+	}
+
+	reqURL, err := f.fileURL(path, wc.user)
+	if err != nil {
+		return err
+	}
+	reqURL += "&type=directory"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("e2b: build mkdir request: %w", err)
+	}
+	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
+
+	resp, err := f.sandbox.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send mkdir request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return &FileNotFoundError{Path: path}
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return &Error{StatusCode: resp.StatusCode, Message: string(body)}
+}
+
+// ===== Remove — delete file or dir =====
+//
+// DELETE /files?path={path}
+// when deleting a directory, it is recursively deleted. deleting a non-existent path returns FileNotFoundError.
+func (f *FilesystemService) Remove(ctx context.Context, path string) error {
+	reqURL, err := f.fileURL(path, "")
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("e2b: build remove request: %w", err)
+	}
+	req.Header.Set("X-Access-Token", f.sandbox.accessToken)
+
+	resp, err := f.sandbox.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send remove request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return &FileNotFoundError{Path: path}
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return &Error{StatusCode: resp.StatusCode, Message: string(body)}
+}
+func parseModTime(s string) time.Time {
+    for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z07:00"} {
+        if t, err := time.Parse(layout, s); err == nil {
+            return t
+        }
+    }
+    return time.Time{}
+} 

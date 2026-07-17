@@ -525,3 +525,524 @@ func TestNewSandboxInitializesFilesystem(t *testing.T) {
 		t.Error("Filesystem is nil")
 	}
 }
+
+// --- List tests ---
+
+func TestFilesystemList(t *testing.T) {
+	const dir = "/home/user/mydir"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Query().Get("path") != dir {
+			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), dir)
+		}
+		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
+			t.Errorf("X-Access-Token = %q, want token-test", tok)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"name": "file1.txt", "path": dir + "/file1.txt", "type": "file", "size": 100, "mtime": "2024-01-15T10:30:00Z"},
+			{"name": "subdir", "path": dir + "/subdir", "type": "dir", "size": 0, "mtime": "2024-01-15T11:00:00Z"},
+		})
+	})
+
+	entries, err := sbx.Filesystem.List(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "file1.txt" {
+		t.Errorf("entries[0].Name = %q, want file1.txt", entries[0].Name)
+	}
+	if entries[0].Type != "file" {
+		t.Errorf("entries[0].Type = %q, want file", entries[0].Type)
+	}
+	if entries[1].Name != "subdir" {
+		t.Errorf("entries[1].Name = %q, want subdir", entries[1].Name)
+	}
+	if entries[1].Type != "dir" {
+		t.Errorf("entries[1].Type = %q, want dir", entries[1].Type)
+	}
+	// ModTime should be parsed
+	if entries[0].ModTime.IsZero() {
+		t.Error("entries[0].ModTime is zero")
+	}
+}
+
+func TestFilesystemListEmpty(t *testing.T) {
+	const dir = "/empty/dir"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	})
+
+	entries, err := sbx.Filesystem.List(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("len(entries) = %d, want 0", len(entries))
+	}
+}
+
+func TestFilesystemListWithUser(t *testing.T) {
+	const dir = "/root"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
+		if u := r.URL.Query().Get("username"); u != "root" {
+			t.Errorf("username param = %q, want root", u)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	})
+
+	_, err := sbx.Filesystem.List(context.Background(), dir, WithFileUser("root"))
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+}
+
+func TestFilesystemListNotFound(t *testing.T) {
+	const dir = "/nonexistent/dir"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	_, err := sbx.Filesystem.List(context.Background(), dir)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *FileNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *FileNotFoundError, got %T: %v", err, err)
+	}
+	if e.Path != dir {
+		t.Errorf("FileNotFoundError.Path = %q, want %q", e.Path, dir)
+	}
+}
+
+func TestFilesystemListServerError(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	})
+
+	_, err := sbx.Filesystem.List(context.Background(), "/tmp")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestFilesystemListInvalidJSON(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	})
+
+	_, err := sbx.Filesystem.List(context.Background(), "/tmp")
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestFilesystemListModTimeFormats(t *testing.T) {
+	// verify that various mtime formats from envd are parsed correctly.
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"name": "a.txt", "path": "/tmp/a.txt", "mtime": "2024-06-15T08:00:00Z"},
+			{"name": "b.txt", "path": "/tmp/b.txt", "mtime": "2024-06-15T08:00:00.123456789Z"},
+			{"name": "c.txt", "path": "/tmp/c.txt", "mtime": "2024-06-15T08:00:00+08:00"},
+		})
+	})
+
+	entries, err := sbx.Filesystem.List(context.Background(), "/tmp")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.ModTime.IsZero() {
+			t.Errorf("ModTime is zero for %s", entry.Name)
+		}
+	}
+}
+
+// --- Stat tests ---
+
+func TestFilesystemStat(t *testing.T) {
+	const path = "/home/user/file.txt"
+
+	sbx := &Sandbox{
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodHead {
+						t.Errorf("method = %s, want HEAD", req.Method)
+					}
+					if req.URL.Query().Get("path") != path {
+						t.Errorf("path param = %q, want %q", req.URL.Query().Get("path"), path)
+					}
+					if tok := req.Header.Get("X-Access-Token"); tok != "token-test" {
+						t.Errorf("X-Access-Token = %q, want token-test", tok)
+					}
+					body := `{"name":"file.txt","path":"/home/user/file.txt","type":"file","size":2048,"mtime":"2024-03-20T14:00:00Z"}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+					}, nil
+				}),
+			},
+		},
+	}
+	sbx.Filesystem = newFilesystemService(sbx)
+
+	info, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Name != "file.txt" {
+		t.Errorf("Name = %q, want file.txt", info.Name)
+	}
+	if info.Path != path {
+		t.Errorf("Path = %q, want %q", info.Path, path)
+	}
+	if info.Type != "file" {
+		t.Errorf("Type = %q, want file", info.Type)
+	}
+	if info.Size != 2048 {
+		t.Errorf("Size = %d, want 2048", info.Size)
+	}
+	if info.ModTime.IsZero() {
+		t.Error("ModTime is zero")
+	}
+}
+
+func TestFilesystemStatDir(t *testing.T) {
+	const path = "/home/user/mydir"
+
+	sbx := &Sandbox{
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					body := `{"name":"mydir","path":"/home/user/mydir","type":"dir","size":4096,"mtime":"2024-03-20T14:30:00Z"}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+					}, nil
+				}),
+			},
+		},
+	}
+	sbx.Filesystem = newFilesystemService(sbx)
+
+	info, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Type != "dir" {
+		t.Errorf("Type = %q, want dir", info.Type)
+	}
+}
+
+func TestFilesystemStatWithUser(t *testing.T) {
+	const path = "/root/.bashrc"
+
+	sbx := &Sandbox{
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if u := req.URL.Query().Get("username"); u != "root" {
+						t.Errorf("username param = %q, want root", u)
+					}
+					body := `{"name":".bashrc","path":"/root/.bashrc"}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+					}, nil
+				}),
+			},
+		},
+	}
+	sbx.Filesystem = newFilesystemService(sbx)
+
+	_, err := sbx.Filesystem.Stat(context.Background(), path, WithFileUser("root"))
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+}
+
+func TestFilesystemStatNotFound(t *testing.T) {
+	const path = "/does/not/exist.txt"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	_, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *FileNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *FileNotFoundError, got %T: %v", err, err)
+	}
+	if e.Path != path {
+		t.Errorf("FileNotFoundError.Path = %q, want %q", e.Path, path)
+	}
+}
+
+func TestFilesystemStatServerError(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("bad gateway"))
+	})
+
+	_, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if e.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusBadGateway)
+	}
+}
+
+func TestFilesystemStatInvalidJSON(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{!invalid}"))
+	})
+
+	_, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+// --- MakeDir tests ---
+
+func TestFilesystemMakeDir(t *testing.T) {
+	const dir = "/home/user/newdir"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Query().Get("path") != dir {
+			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), dir)
+		}
+		if r.URL.Query().Get("type") != "directory" {
+			t.Errorf("type param = %q, want directory", r.URL.Query().Get("type"))
+		}
+		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
+			t.Errorf("X-Access-Token = %q, want token-test", tok)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+}
+
+func TestFilesystemMakeDirCreated(t *testing.T) {
+	const dir = "/home/user/newdir"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+}
+
+func TestFilesystemMakeDirWithUser(t *testing.T) {
+	const dir = "/root/special"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
+		if u := r.URL.Query().Get("username"); u != "root" {
+			t.Errorf("username param = %q, want root", u)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), dir, WithFileUser("root"))
+	if err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+}
+
+func TestFilesystemMakeDirNotFound(t *testing.T) {
+	const dir = "/nonexistent/parent/child"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *FileNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *FileNotFoundError, got %T: %v", err, err)
+	}
+	if e.Path != dir {
+		t.Errorf("FileNotFoundError.Path = %q, want %q", e.Path, dir)
+	}
+}
+
+func TestFilesystemMakeDirServerError(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("forbidden"))
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), "/root/protected")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if e.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestFilesystemMakeDirTimeout(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := sbx.Filesystem.MakeDir(context.Background(), "/tmp/mydir", WithWriteTimeout(1*time.Millisecond))
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+}
+
+// --- Remove tests ---
+
+func TestFilesystemRemove(t *testing.T) {
+	const path = "/tmp/file-to-delete.txt"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		if r.URL.Query().Get("path") != path {
+			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), path)
+		}
+		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
+			t.Errorf("X-Access-Token = %q, want token-test", tok)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := sbx.Filesystem.Remove(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+}
+
+func TestFilesystemRemoveNoContent(t *testing.T) {
+	const path = "/tmp/file-deleted.txt"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	err := sbx.Filesystem.Remove(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+}
+
+func TestFilesystemRemoveDir(t *testing.T) {
+	const dir = "/tmp/dir-to-remove"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := sbx.Filesystem.Remove(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Remove (dir): %v", err)
+	}
+}
+
+func TestFilesystemRemoveNotFound(t *testing.T) {
+	const path = "/does/not/exist.txt"
+
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	err := sbx.Filesystem.Remove(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *FileNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *FileNotFoundError, got %T: %v", err, err)
+	}
+	if e.Path != path {
+		t.Errorf("FileNotFoundError.Path = %q, want %q", e.Path, path)
+	}
+}
+
+func TestFilesystemRemoveServerError(t *testing.T) {
+	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("remove failed"))
+	})
+
+	err := sbx.Filesystem.Remove(context.Background(), "/tmp/f.txt")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
