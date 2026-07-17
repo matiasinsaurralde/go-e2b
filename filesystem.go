@@ -297,8 +297,9 @@ func (f *FilesystemService) List(ctx context.Context, path string, opts ...ReadO
 
 // ===== Stat — get single file/dir metadata =====
 //
-// HEAD /files?path={path} returns a single FileInfo.
-// envd returns JSON in the body of the HEAD response, the same format as GET for a single file path.
+// GET /files?path={path} returns file metadata.
+// envd GET returns a JSON array for directories, binary for files.
+// We infer type from the response shape.
 func (f *FilesystemService) Stat(ctx context.Context, path string, opts ...ReadOption) (*FileInfo, error) {
 	rc := &readConfig{timeout: DefaultCommandTimeout}
 	for _, o := range opts {
@@ -316,7 +317,7 @@ func (f *FilesystemService) Stat(ctx context.Context, path string, opts ...ReadO
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: build stat request: %w", err)
 	}
@@ -336,23 +337,68 @@ func (f *FilesystemService) Stat(ctx context.Context, path string, opts ...ReadO
 		return nil, &Error{StatusCode: resp.StatusCode, Message: string(body)}
 	}
 
-	var raw struct {
+	// envd GET on a directory returns a JSON array [{...}].
+	// envd GET on a file returns binary content.
+	// Try array first, then binary.
+	return inferFileInfoFromResponse(resp, path), nil
+}
+
+// inferFileInfoFromResponse extracts FileInfo from an envd GET /files response.
+func inferFileInfoFromResponse(resp *http.Response, path string) *FileInfo {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &FileInfo{Name: baseName(path), Path: path, Type: "file"}
+	}
+
+	// Try JSON array -> directory.
+	var entries []struct {
 		Name  string `json:"name"`
 		Path  string `json:"path"`
 		Type  string `json:"type,omitempty"`
 		Size  int64  `json:"size,omitempty"`
 		Mtime string `json:"mtime,omitempty"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("e2b: decode stat response: %w", err)
+	if json.Unmarshal(body, &entries) == nil && len(entries) > 0 {
+		return &FileInfo{
+			Name:    baseName(path),
+			Path:    path,
+			Type:    "directory",
+			ModTime: parseModTime(entries[0].Mtime),
+		}
 	}
+
+	// Try single object -> file with metadata.
+	var single struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		Type  string `json:"type,omitempty"`
+		Size  int64  `json:"size,omitempty"`
+		Mtime string `json:"mtime,omitempty"`
+	}
+	if json.Unmarshal(body, &single) == nil && single.Path != "" {
+		return &FileInfo{
+			Name:    single.Name,
+			Path:    single.Path,
+			Type:    single.Type,
+			Size:    single.Size,
+			ModTime: parseModTime(single.Mtime),
+		}
+	}
+
+	// Binary content -> file.
 	return &FileInfo{
-		Name:    raw.Name,
-		Path:    raw.Path,
-		Type:    raw.Type,
-		Size:    raw.Size,
-		ModTime: parseModTime(raw.Mtime),
-	}, nil 
+		Name: baseName(path),
+		Path: path,
+		Type: "file",
+		Size: int64(len(body)),
+	}
+}
+
+func baseName(p string) string {
+	if idx := strings.LastIndexByte(p, '/'); idx >= 0 {
+		return p[idx+1:]
+	}
+	return p
 }
 
 // ===== MakeDir — create directory =====

@@ -696,7 +696,7 @@ func TestFilesystemStat(t *testing.T) {
 			sandboxDomain: "test.e2b.app",
 			httpClient: &http.Client{
 				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					if req.Method != http.MethodHead {
+					if req.Method != http.MethodGet {
 						t.Errorf("method = %s, want HEAD", req.Method)
 					}
 					if req.URL.Query().Get("path") != path {
@@ -839,18 +839,31 @@ func TestFilesystemStatServerError(t *testing.T) {
 	}
 }
 
+// Stat on a non-directory path returns binary content from envd, so
+// invalid JSON is treated as a plain file (binary fallback), not an error.
 func TestFilesystemStatInvalidJSON(t *testing.T) {
+	const path = "/tmp/f.txt"
+	const body = "{!invalid}"
+
 	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{!invalid}"))
+		_, _ = w.Write([]byte(body))
 	})
 
-	_, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
+	info, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Path != path {
+		t.Errorf("Path = %q, want %q", info.Path, path)
+	}
+	if info.Type != "file" {
+		t.Errorf("Type = %q, want file (binary fallback)", info.Type)
+	}
+	if info.Size != int64(len(body)) {
+		t.Errorf("Size = %d, want %d", info.Size, len(body))
 	}
 }
-
 // --- MakeDir tests ---
 
 func TestFilesystemMakeDir(t *testing.T) {
