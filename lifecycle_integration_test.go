@@ -737,3 +737,190 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 
 	t.Logf("=== AUTO-RESUME CONNECT & READ TEST COMPLETED SUCCESSFULLY ===")
 }
+
+// ============================================================================
+// ListSandboxesV2 integration test
+// ============================================================================
+// Creates sandboxes with metadata, lets them auto-pause, then verifies that
+// ListSandboxesV2 can find paused sandboxes and filter by state + metadata.
+//
+// Run with:
+//
+//	E2B_API_KEY=e2b_xxx E2B_TEMPLATE=nlhz8vlwyupq845jsdg9 go test -tags=integration -v -timeout 20m -run TestIntegrationListSandboxesV2 ./...
+func TestIntegrationListSandboxesV2(t *testing.T) {
+	client := lifecycleIntegrationClient(t)
+	ctx := context.Background()
+
+	autoPauseMem := false
+
+	// ── Step 1: Create sandbox A with metadata ──
+	t.Log("=== Step 1: Create sandbox A with metadata ===")
+	sbxA, err := client.NewSandbox(ctx, SandboxConfig{
+		Template:        lifecycleTemplate(t),
+		Timeout:         30,
+		AutoPause:       true,
+		AutoPauseMemory: &autoPauseMem,
+		Metadata:        map[string]string{"test": "list-v2", "index": "a"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox A: %v", err)
+	}
+	defer sbxA.Close()
+	t.Logf("  sandbox A: %s", sbxA.ID)
+
+	// ── Step 2: Create sandbox B with metadata ──
+	t.Log("=== Step 2: Create sandbox B with metadata ===")
+	sbxB, err := client.NewSandbox(ctx, SandboxConfig{
+		Template:        lifecycleTemplate(t),
+		Timeout:         30,
+		AutoPause:       true,
+		AutoPauseMemory: &autoPauseMem,
+		Metadata:        map[string]string{"test": "list-v2", "index": "b"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox B: %v", err)
+	}
+	defer sbxB.Close()
+	t.Logf("  sandbox B: %s", sbxB.ID)
+
+	// ── Step 3: Wait for both to auto-pause ──
+	t.Log("=== Step 3: Waiting 35s for auto-pause... ===")
+	time.Sleep(35 * time.Second)
+
+	// ── Step 4: ListSandboxesV2 — find paused sandboxes ──
+	t.Log("=== Step 4: ListSandboxesV2 with state=paused ===")
+	result, err := client.ListSandboxesV2(ctx, WithSandboxState("paused"))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(paused): %v", err)
+	}
+	t.Logf("  found %d paused sandboxes", len(result.Sandboxes))
+
+	// Verify our sandbox A is in the list.
+	var foundA, foundB bool
+	for _, s := range result.Sandboxes {
+		t.Logf("  - %s state=%s template=%s metadata=%v", s.ID, s.State, s.Template, s.Metadata)
+		if s.ID == sbxA.ID {
+			foundA = true
+			if s.State != "paused" {
+				t.Errorf("sandbox A state = %q, want paused", s.State)
+			}
+		}
+		if s.ID == sbxB.ID {
+			foundB = true
+			if s.State != "paused" {
+				t.Errorf("sandbox B state = %q, want paused", s.State)
+			}
+		}
+	}
+	if !foundA {
+		t.Errorf("sandbox A (%s) not found in paused list", sbxA.ID)
+	}
+	if !foundB {
+		t.Errorf("sandbox B (%s) not found in paused list", sbxB.ID)
+	}
+	t.Logf("  foundA=%v foundB=%v", foundA, foundB)
+
+	// ── Step 5: ListSandboxesV2 — filter by metadata ──
+	t.Log("=== Step 5: ListSandboxesV2 with metadata filtering ===")
+	resultMeta, err := client.ListSandboxesV2(ctx,
+		WithSandboxMetadata(map[string]string{"test": "list-v2"}))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(metadata): %v", err)
+	}
+	t.Logf("  found %d sandboxes matching test=list-v2", len(resultMeta.Sandboxes))
+
+	metaFoundA, metaFoundB := false, false
+	for _, s := range resultMeta.Sandboxes {
+		t.Logf("  - %s metadata=%v", s.ID, s.Metadata)
+		if s.ID == sbxA.ID {
+			metaFoundA = true
+		}
+		if s.ID == sbxB.ID {
+			metaFoundB = true
+		}
+	}
+	if !metaFoundA {
+		t.Errorf("sandbox A not found via metadata filter")
+	}
+	if !metaFoundB {
+		t.Errorf("sandbox B not found via metadata filter")
+	}
+
+	// ── Step 6: ListSandboxesV2 — combined filter (state + metadata) ──
+	t.Log("=== Step 6: ListSandboxesV2 with state=paused AND metadata ===")
+	resultCombined, err := client.ListSandboxesV2(ctx,
+		WithSandboxState("paused"),
+		WithSandboxMetadata(map[string]string{"index": "a"}))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(state+paused, metadata): %v", err)
+	}
+	t.Logf("  found %d sandboxes matching paused + index=a", len(resultCombined.Sandboxes))
+
+	// Should find sandbox A (paused + index=a).
+	foundACombined := false
+	for _, s := range resultCombined.Sandboxes {
+		t.Logf("  - %s state=%s metadata=%v", s.ID, s.State, s.Metadata)
+		if s.ID == sbxA.ID {
+			foundACombined = true
+		}
+		if s.ID == sbxB.ID {
+			t.Errorf("sandbox B should NOT appear in combined filter (index=b)")
+		}
+	}
+	if !foundACombined {
+		t.Errorf("sandbox A not found via combined filter")
+	}
+
+	// ── Step 7: ListSandboxesV2 with pagination ──
+	t.Log("=== Step 7: ListSandboxesV2 pagination ===")
+	resultPage1, err := client.ListSandboxesV2(ctx, WithSandboxLimit(1))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2 page1: %v", err)
+	}
+	t.Logf("  page1: %d items, nextToken=%q", len(resultPage1.Sandboxes), resultPage1.NextToken)
+	if len(resultPage1.Sandboxes) == 0 && resultPage1.NextToken == "" {
+		t.Log("  (only 1 sandbox total, pagination not applicable)")
+	} else {
+		if resultPage1.NextToken == "" && len(resultPage1.Sandboxes) > 1 {
+			t.Errorf("expected nextToken when limit < total items")
+		}
+		// Fetch page 2 if token exists.
+		if resultPage1.NextToken != "" {
+			resultPage2, err := client.ListSandboxesV2(ctx, WithSandboxNextToken(resultPage1.NextToken))
+			if err != nil {
+				t.Fatalf("ListSandboxesV2 page2: %v", err)
+			}
+			t.Logf("  page2: %d items, nextToken=%q", len(resultPage2.Sandboxes), resultPage2.NextToken)
+			if len(resultPage2.Sandboxes) == 0 {
+				t.Error("page2 should have at least 1 item")
+			}
+		}
+	}
+
+	// ── Step 8: ListSandboxesV2 — default (no filter) returns both running & paused ──
+	t.Log("=== Step 8: ListSandboxesV2 default (no filter) ===")
+	resultAll, err := client.ListSandboxesV2(ctx)
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(all): %v", err)
+	}
+	t.Logf("  found %d sandboxes total", len(resultAll.Sandboxes))
+
+	// Our two paused sandboxes should be in the default list.
+	allFoundA, allFoundB := false, false
+	for _, s := range resultAll.Sandboxes {
+		if s.ID == sbxA.ID {
+			allFoundA = true
+		}
+		if s.ID == sbxB.ID {
+			allFoundB = true
+		}
+	}
+	if !allFoundA {
+		t.Errorf("sandbox A not found in default ListSandboxesV2")
+	}
+	if !allFoundB {
+		t.Errorf("sandbox B not found in default ListSandboxesV2")
+	}
+
+	t.Logf("=== LIST SANDBOXES V2 INTEGRATION TEST COMPLETED SUCCESSFULLY ===")
+}

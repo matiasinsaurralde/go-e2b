@@ -295,3 +295,121 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds i
 	sbx.Filesystem = newFilesystemService(sbx)
 	return sbx, nil
 }
+
+// listSandboxesV2Params holds query parameters for ListSandboxesV2.
+type listSandboxesV2Params struct {
+	state     []string
+	metadata  map[string]string
+	limit     int
+	nextToken string
+}
+
+// ListSandboxesV2Option configures a ListSandboxesV2 request.
+type ListSandboxesV2Option func(*listSandboxesV2Params)
+
+// WithSandboxState filters sandboxes by one or more states (e.g. "running", "paused").
+// If not specified, both running and paused sandboxes are returned.
+func WithSandboxState(states ...string) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.state = states }
+}
+
+// WithSandboxMetadata filters sandboxes by metadata key=value pairs.
+func WithSandboxMetadata(metadata map[string]string) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.metadata = metadata }
+}
+
+// WithSandboxLimit sets the maximum number of sandboxes to return per page (default 100).
+func WithSandboxLimit(n int) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.limit = n }
+}
+
+// WithSandboxNextToken sets the pagination token from a previous ListSandboxesV2Result.
+func WithSandboxNextToken(token string) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.nextToken = token }
+}
+
+// ListSandboxesV2Result holds the result of a ListSandboxesV2 call, including pagination.
+type ListSandboxesV2Result struct {
+	Sandboxes []SandboxInfo
+	NextToken string
+}
+
+// ListSandboxesV2 returns all sandboxes (running and paused) for this client's API key
+// using the v2 endpoint. It supports filtering by state and metadata, plus cursor-based
+// pagination via limit and nextToken.
+//
+// Example:
+//
+//	// List all running and paused sandboxes.
+//	result, err := client.ListSandboxesV2(ctx)
+//
+//	// List only paused sandboxes.
+//	result, err := client.ListSandboxesV2(ctx, WithSandboxState("paused"))
+//
+//	// Filter by metadata.
+//	result, err := client.ListSandboxesV2(ctx, WithSandboxMetadata(map[string]string{"env": "dev"}))
+//
+//	// Pagination.
+//	result, err := client.ListSandboxesV2(ctx, WithSandboxLimit(10))
+//	for result.NextToken != "" {
+//		next, err := client.ListSandboxesV2(ctx, WithSandboxNextToken(result.NextToken))
+//		// ...
+//	}
+func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Option) (*ListSandboxesV2Result, error) {
+	var p listSandboxesV2Params
+	for _, o := range opts {
+		o(&p)
+	}
+
+	u := c.apiBaseURL + "/v2/sandboxes"
+	sep := '?'
+
+	// Append state filters.
+	if len(p.state) > 0 {
+		for _, s := range p.state {
+			u += string(sep) + "state=" + s
+			sep = '&'
+		}
+	}
+
+	// Append metadata filters.
+	for k, v := range p.metadata {
+		u += string(sep) + "metadata=" + k + "=" + v
+		sep = '&'
+	}
+
+	if p.limit > 0 {
+		u += string(sep) + "limit=" + fmt.Sprintf("%d", p.limit)
+		sep = '&'
+	}
+	if p.nextToken != "" {
+		u += string(sep) + "nextToken=" + p.nextToken
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build list v2 request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send list v2 request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var sandboxes []SandboxInfo
+	if err := json.NewDecoder(resp.Body).Decode(&sandboxes); err != nil {
+		return nil, fmt.Errorf("e2b: decode list v2 response: %w", err)
+	}
+
+	return &ListSandboxesV2Result{
+		Sandboxes: sandboxes,
+		NextToken: resp.Header.Get("X-Next-Token"),
+	}, nil
+}
