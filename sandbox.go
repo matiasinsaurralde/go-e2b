@@ -132,20 +132,21 @@ type VolumeMount struct {
 
 // SandboxInfo holds details about a sandbox.
 type SandboxInfo struct {
-	ID           string           `json:"sandboxID"`
-	Alias        string           `json:"alias,omitempty"`
-	ClientID     string           `json:"clientID,omitempty"`
-	Template     string           `json:"templateID"`
-	State        string           `json:"state"`
-	CPUCount     int              `json:"cpuCount"`
-	MemoryMB     int              `json:"memoryMB"`
-	DiskSizeMB   int              `json:"diskSizeMB"`
-	StartedAt    string           `json:"startedAt"`
-	EndAt        string           `json:"endAt,omitempty"`
-	EnvdVersion  string           `json:"envdVersion,omitempty"`
-	Lifecycle    SandboxLifecycle `json:"lifecycle,omitempty"`
-	VolumeMounts []VolumeMount    `json:"volumeMounts,omitempty"`
-	Network      *NetworkConfig   `json:"network,omitempty"`
+	ID           string            `json:"sandboxID"`
+	Alias        string            `json:"alias,omitempty"`
+	ClientID     string            `json:"clientID,omitempty"`
+	Template     string            `json:"templateID"`
+	State        string            `json:"state"`
+	CPUCount     int               `json:"cpuCount"`
+	MemoryMB     int               `json:"memoryMB"`
+	DiskSizeMB   int               `json:"diskSizeMB"`
+	StartedAt    string            `json:"startedAt"`
+	EndAt        string            `json:"endAt,omitempty"`
+	EnvdVersion  string            `json:"envdVersion,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Lifecycle    SandboxLifecycle  `json:"lifecycle,omitempty"`
+	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
+	Network      *NetworkConfig    `json:"network,omitempty"`
 }
 
 // envdBaseURL returns the base URL of the sandbox environment daemon.

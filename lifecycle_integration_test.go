@@ -179,14 +179,22 @@ func TestIntegrationNewSandboxMetadata(t *testing.T) {
 	}
 	t.Logf("  state=%s, clientID=%s", info.State, info.ClientID)
 
-	// The info endpoint returns sandbox-level data; metadata is not in the
-	// standard info response per current API spec, but we verify the create
-	// succeeded and the sandbox is running.
 	if info.State != "running" {
 		t.Errorf("expected state=running, got %q", info.State)
 	}
 
-	t.Logf("  metadata sandbox is running correctly")
+	// Verify metadata round-trip: create → Info() should return the same values.
+	if info.Metadata["test_name"] != "lifecycle-metadata" {
+		t.Errorf("metadata[test_name] = %q, want %q", info.Metadata["test_name"], "lifecycle-metadata")
+	}
+	if info.Metadata["env"] != "integration" {
+		t.Errorf("metadata[env] = %q, want %q", info.Metadata["env"], "integration")
+	}
+	if info.Metadata["runner"] != "go-sdk" {
+		t.Errorf("metadata[runner] = %q, want %q", info.Metadata["runner"], "go-sdk")
+	}
+
+	t.Logf("  metadata round-trip: %v", info.Metadata)
 }
 
 // ============================================================================
