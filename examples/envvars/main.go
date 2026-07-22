@@ -29,7 +29,7 @@ func main() {
 	fmt.Printf("Sandbox created: %s\n", sandbox.ID)
 
 	// Per-command environment variables using WithEnv.
-	result, err := sandbox.Commands.Run("bash", []string{"-c", "echo FOO=$FOO BAR=$BAR"},
+	result, err := sandbox.Commands.Run(context.Background(), "echo FOO=$FOO BAR=$BAR",
 		e2b.WithEnv(map[string]string{"FOO": "hello", "BAR": "world"}),
 	)
 	if err != nil {

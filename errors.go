@@ -73,3 +73,52 @@ func (e *TemplateBuildError) Error() string {
 	}
 	return fmt.Sprintf("e2b: template build failed: %s", e.Reason.Message)
 }
+
+// InvalidArgumentError is returned when the sandbox rejects a request because
+// an argument was invalid (e.g. an unsupported option for the running envd
+// version). It maps from the Connect/gRPC InvalidArgument code.
+type InvalidArgumentError struct {
+	Message string
+}
+
+// Error implements the error interface.
+func (e *InvalidArgumentError) Error() string {
+	return fmt.Sprintf("e2b: invalid argument: %s", e.Message)
+}
+
+// AuthenticationError is returned when the sandbox rejects a request because
+// authentication failed (e.g. a missing or invalid access token). It maps from
+// the Connect/gRPC Unauthenticated code.
+type AuthenticationError struct {
+	Message string
+}
+
+// Error implements the error interface.
+func (e *AuthenticationError) Error() string {
+	return fmt.Sprintf("e2b: authentication failed: %s", e.Message)
+}
+
+// CommandExitError is returned by CommandHandle.Wait when a command finishes
+// with a non-zero exit code. It embeds the CommandResult so callers can still
+// inspect the captured stdout, stderr, and exit code.
+type CommandExitError struct {
+	// Stdout is the accumulated standard output of the command.
+	Stdout string
+
+	// Stderr is the accumulated standard error output of the command.
+	Stderr string
+
+	// ExitCode is the non-zero process exit code.
+	ExitCode int
+
+	// Message is the error message reported by the sandbox, if any.
+	Message string
+}
+
+// Error implements the error interface.
+func (e *CommandExitError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("e2b: command exited with code %d: %s", e.ExitCode, e.Message)
+	}
+	return fmt.Sprintf("e2b: command exited with code %d", e.ExitCode)
+}

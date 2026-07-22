@@ -50,7 +50,7 @@ func main() {
     }
     defer sandbox.Close()
 
-    result, err := sandbox.Commands.Run("echo", []string{"hello, world"})
+    result, err := sandbox.Commands.Run(context.Background(), "echo hello, world")
     if err != nil {
         log.Fatal(err)
     }
@@ -89,17 +89,25 @@ The `base` template includes Python 3.11, Node.js 20, npm, Yarn, git, and the Gi
 
 ### Running Commands
 
+`Run` takes a `context.Context` and a single shell command string, executed
+through a login shell (`/bin/bash -l -c`), so pipes, redirection, and
+environment expansion all work. It blocks until the command finishes.
+
 ```go
+ctx := context.Background()
+
 // Simple command
-result, err := sandbox.Commands.Run("python3", []string{"-c", "print('hello')"})
+result, err := sandbox.Commands.Run(ctx, "python3 -c 'print(1 + 1)'")
+
+// Shell features
+result, err = sandbox.Commands.Run(ctx, "echo one two three | wc -w")
 
 // With options
-result, err := sandbox.Commands.Run(
-    "bash", []string{"-c", "echo $FOO"},
+result, err = sandbox.Commands.Run(ctx, "echo $FOO",
     e2b.WithEnv(map[string]string{"FOO": "bar"}),
     e2b.WithCwd("/tmp"),
-    e2b.WithUser("ubuntu"),
-    e2b.WithTimeout(30 * time.Second),
+    e2b.WithUser("root"),
+    e2b.WithTimeout(30*time.Second),
 )
 
 fmt.Println(result.Stdout)
@@ -107,24 +115,66 @@ fmt.Println(result.Stderr)
 fmt.Println(result.ExitCode)
 ```
 
-### Context Support
+A non-zero exit code returns a `*e2b.CommandExitError` (the `*CommandResult` is
+still returned so you can inspect the output):
 
 ```go
-ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-defer cancel()
+result, err := sandbox.Commands.Run(ctx, "exit 3")
+var exitErr *e2b.CommandExitError
+if errors.As(err, &exitErr) {
+    fmt.Println(exitErr.ExitCode) // 3
+}
+```
 
-client, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
+### Streaming Output
+
+Stream stdout/stderr as it is produced via callbacks:
+
+```go
+handle, err := sandbox.Commands.Start(ctx, "for i in 1 2 3; do echo $i; sleep 1; done",
+    e2b.WithOnStdout(func(b []byte) { fmt.Print(string(b)) }),
+    e2b.WithOnStderr(func(b []byte) { fmt.Fprint(os.Stderr, string(b)) }),
+)
 if err != nil {
     log.Fatal(err)
 }
+result, err := handle.Wait(ctx) // drives the stream, returns the final result
+```
 
-sandbox, err := client.NewSandbox(ctx, e2b.SandboxConfig{Template: "base"})
+### Background Commands, stdin, and Process Management
+
+```go
+// Start a command in the background.
+handle, err := sandbox.Commands.Start(ctx, "cat", e2b.WithStdin(true))
+
+// Send data to its stdin, then signal EOF.
+handle.SendStdin(ctx, []byte("hello\n"))
+handle.CloseStdin(ctx)
+
+// List running processes and kill one by PID.
+procs, _ := sandbox.Commands.List(ctx)
+ok, _ := sandbox.Commands.Kill(ctx, procs[0].PID) // false if not found
+
+// Detach without killing, then reattach later by PID.
+handle.Disconnect()
+reattached, _ := sandbox.Commands.Connect(ctx, handle.PID())
+
+result, err := handle.Wait(ctx)
+```
+
+### Interactive Terminals (PTY)
+
+```go
+pty, err := sandbox.Pty.Create(ctx, 80, 24, // cols, rows
+    e2b.WithPtyOnData(func(b []byte) { os.Stdout.Write(b) }),
+)
 if err != nil {
     log.Fatal(err)
 }
-defer sandbox.Close()
-
-result, err := sandbox.Commands.RunWithContext(ctx, "sleep", []string{"5"})
+sandbox.Pty.SendInput(ctx, pty.PID(), []byte("echo $TERM\n"))
+sandbox.Pty.Resize(ctx, pty.PID(), 120, 40)
+sandbox.Pty.SendInput(ctx, pty.PID(), []byte("exit\n"))
+pty.Wait(ctx)
 ```
 
 ### Command Options
@@ -133,8 +183,11 @@ result, err := sandbox.Commands.RunWithContext(ctx, "sleep", []string{"5"})
 |--------|-------------|
 | `WithEnv(map[string]string)` | Set environment variables for the command |
 | `WithCwd(string)` | Set the working directory |
-| `WithUser(string)` | Set the user to run the command as |
-| `WithTimeout(time.Duration)` | Set a per-command execution timeout |
+| `WithUser(string)` | Set the user to run the command as (default: `user`) |
+| `WithTimeout(time.Duration)` | Set the command's maximum lifetime (default: 60s; ≤0 disables) |
+| `WithStdin(bool)` | Keep stdin open for `SendStdin` |
+| `WithOnStdout(func([]byte))` | Stream decoded stdout chunks |
+| `WithOnStderr(func([]byte))` | Stream decoded stderr chunks |
 
 ## Configuration
 
@@ -157,6 +210,8 @@ _, err := e2b.NewClient(e2b.ClientConfig{APIKey: apiKey})
 switch {
 case errors.As(err, &e2b.SandboxNotFoundError{}):
     // sandbox not found
+case errors.As(err, &e2b.CommandExitError{}):
+    // command ran but exited non-zero
 case errors.As(err, &e2b.TimeoutError{}):
     // operation timed out
 case errors.As(err, &e2b.Error{}):

@@ -90,6 +90,9 @@ type Sandbox struct {
 	// Commands provides command execution within the sandbox.
 	Commands *CommandService
 
+	// Pty provides interactive pseudo-terminal sessions within the sandbox.
+	Pty *PtyService
+
 	// Filesystem provides file read and write operations within the sandbox.
 	Filesystem *FilesystemService
 

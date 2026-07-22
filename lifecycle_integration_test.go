@@ -72,7 +72,7 @@ func TestIntegrationNewSandboxBasic(t *testing.T) {
 	}
 
 	// Verify we can execute commands.
-	result, err := sbx.Commands.Run("echo", []string{"hello-integration-test"})
+	result, err := sbx.Commands.Run(context.Background(), "echo hello-integration-test")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestIntegrationLifecycleFullWorkflow(t *testing.T) {
 
 	// ========== Step 3: Run command ==========
 	t.Log("=== Step 3: Run command ===")
-	result, err := sbx.Commands.Run("bash", []string{"-c", "echo 'command-execution-ok' && ls /tmp/workflow-*"})
+	result, err := sbx.Commands.Run(context.Background(), "echo 'command-execution-ok' && ls /tmp/workflow-*")
 	if err != nil {
 		sbx.Close()
 		t.Fatalf("Run: %v", err)
@@ -476,7 +476,7 @@ func TestIntegrationLifecycleFullWorkflow(t *testing.T) {
 
 	// ========== Step 7: Run command again ==========
 	t.Log("=== Step 7: Run command after resume ===")
-	result2, err := resumed.Commands.Run("echo", []string{"post-resume-ok"})
+	result2, err := resumed.Commands.Run(context.Background(), "echo post-resume-ok")
 	if err != nil {
 		resumed.Close()
 		t.Fatalf("Run after resume: %v", err)
@@ -642,7 +642,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 		fileContent = "autoResume test — data survived pause and Connect!"
 	)
 	writeCmd := fmt.Sprintf("echo '%s' > %s", fileContent, filePath)
-	result, err := sbx.Commands.Run("bash", []string{"-c", writeCmd})
+	result, err := sbx.Commands.Run(context.Background(), writeCmd)
 	if err != nil {
 		sbx.Close()
 		t.Fatalf("Run (write): %v", err)
@@ -650,7 +650,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	t.Logf("  write exit=%d stdout=%q", result.ExitCode, strings.TrimSpace(result.Stdout))
 
 	// Confirm the file was written successfully.
-	readBeforePause, err := sbx.Commands.Run("cat", []string{filePath})
+	readBeforePause, err := sbx.Commands.Run(context.Background(), "cat "+filePath)
 	if err != nil {
 		sbx.Close()
 		t.Fatalf("Run (cat before pause): %v", err)
@@ -711,7 +711,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 
 	// ── Step 6: Read the file on the resumed handle via command execution ──
 	t.Log("=== Step 6: Read file on resumed handle via command.Run ===")
-	readResult, err := resumed.Commands.Run("cat", []string{filePath})
+	readResult, err := resumed.Commands.Run(context.Background(), "cat "+filePath)
 	if err != nil {
 		t.Fatalf("Run (cat after resume): %v", err)
 	}
@@ -723,7 +723,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 
 	// ── Step 7: Extra verification — run a fresh command ──
 	t.Log("=== Step 7: Execute fresh command on resumed handle ===")
-	result2, err := resumed.Commands.Run("bash", []string{"-c", "echo 'fresh-command-after-resume' && ls /tmp/auto-resume-test.txt"})
+	result2, err := resumed.Commands.Run(context.Background(), "echo 'fresh-command-after-resume' && ls /tmp/auto-resume-test.txt")
 	if err != nil {
 		t.Fatalf("Run (fresh): %v", err)
 	}

@@ -132,6 +132,7 @@ func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbo
 		client:             c,
 	}
 	sbx.Commands = newCommandService(sbx)
+	sbx.Pty = newPtyService(sbx)
 	sbx.Filesystem = newFilesystemService(sbx)
 	return sbx, nil
 }
@@ -303,6 +304,7 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds i
 		client:             c,
 	}
 	sbx.Commands = newCommandService(sbx)
+	sbx.Pty = newPtyService(sbx)
 	sbx.Filesystem = newFilesystemService(sbx)
 	return sbx, nil
 }

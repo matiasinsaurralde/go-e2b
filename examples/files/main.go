@@ -72,7 +72,7 @@ func main() {
 	fmt.Printf("Read binary file: %d bytes\n", len(readBack))
 
 	// Confirm the sandbox can see the file via a command.
-	result, err := sandbox.Commands.Run("cat", []string{path})
+	result, err := sandbox.Commands.Run(ctx, "cat "+path)
 	if err != nil {
 		log.Fatalf("Failed to run cat: %v", err)
 	}
