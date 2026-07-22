@@ -1598,6 +1598,51 @@ func TestClientListSandboxesV2Pagination(t *testing.T) {
 	}
 }
 
+func TestClientListSandboxesV2URLEncoding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify metadata values decode correctly despite special characters.
+		metaValues := r.URL.Query()["metadata"]
+		expected := map[string]bool{
+			"env=prod":        true,
+			"session=abc&def": true,
+			"key=1+2=3":       true,
+		}
+		found := 0
+		for _, mv := range metaValues {
+			t.Logf("decoded metadata: %q", mv)
+			if expected[mv] {
+				found++
+			}
+		}
+		if found != 3 {
+			t.Errorf("expected 3 metadata values, got %d: %v", found, metaValues)
+		}
+
+		// Verify nextToken decodes correctly.
+		if got := r.URL.Query().Get("nextToken"); got != "tok+/%x" {
+			t.Errorf("nextToken = %q, want %q", got, "tok+/%x")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	_, err := client.ListSandboxesV2(context.Background(),
+		WithSandboxMetadata(map[string]string{
+			"env":     "prod",
+			"session": "abc&def",
+			"key":     "1+2=3",
+		}),
+		WithSandboxNextToken("tok+/%x"),
+	)
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
 func TestClientListSandboxesV2Empty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

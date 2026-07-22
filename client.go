@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // ClientConfig configures a new Client.
@@ -197,21 +198,23 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ...ListSnapshotsOption)
 		o(&p)
 	}
 
-	u := c.apiBaseURL + "/snapshots"
-	sep := '?'
+	baseURL, err := url.Parse(c.apiBaseURL + "/snapshots")
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build list snapshots URL: %w", err)
+	}
+	q := baseURL.Query()
 	if p.sandboxID != "" {
-		u += string(sep) + "sandboxID=" + p.sandboxID
-		sep = '&'
+		q.Set("sandboxID", p.sandboxID)
 	}
 	if p.limit > 0 {
-		u += string(sep) + "limit=" + fmt.Sprintf("%d", p.limit)
-		sep = '&'
+		q.Set("limit", fmt.Sprintf("%d", p.limit))
 	}
 	if p.nextToken != "" {
-		u += string(sep) + "nextToken=" + p.nextToken
+		q.Set("nextToken", p.nextToken)
 	}
+	baseURL.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: build list snapshots request: %w", err)
 	}
@@ -361,32 +364,32 @@ func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Opt
 		o(&p)
 	}
 
-	u := c.apiBaseURL + "/v2/sandboxes"
-	sep := '?'
+	baseURL, err := url.Parse(c.apiBaseURL + "/v2/sandboxes")
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build list v2 URL: %w", err)
+	}
+	q := baseURL.Query()
 
 	// Append state filters.
-	if len(p.state) > 0 {
-		for _, s := range p.state {
-			u += string(sep) + "state=" + s
-			sep = '&'
-		}
+	for _, s := range p.state {
+		q.Add("state", s)
 	}
 
-	// Append metadata filters.
+	// Append metadata filters (each metadata pair is key=value).
 	for k, v := range p.metadata {
-		u += string(sep) + "metadata=" + k + "=" + v
-		sep = '&'
+		q.Add("metadata", k+"="+v)
 	}
 
 	if p.limit > 0 {
-		u += string(sep) + "limit=" + fmt.Sprintf("%d", p.limit)
-		sep = '&'
+		q.Set("limit", fmt.Sprintf("%d", p.limit))
 	}
 	if p.nextToken != "" {
-		u += string(sep) + "nextToken=" + p.nextToken
+		q.Set("nextToken", p.nextToken)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	baseURL.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: build list v2 request: %w", err)
 	}
