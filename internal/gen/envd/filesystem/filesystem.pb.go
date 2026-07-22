@@ -494,6 +494,10 @@ type EntryInfo struct {
 	ModifiedTime *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=modified_time,json=modifiedTime,proto3" json:"modified_time,omitempty"`
 	// If the entry is a symlink, this field contains the target of the symlink.
 	SymlinkTarget *string `protobuf:"bytes,10,opt,name=symlink_target,json=symlinkTarget,proto3,oneof" json:"symlink_target,omitempty"`
+	// User-defined metadata stored as extended attributes (xattrs) on the file.
+	// Keys live under the `user.e2b.` xattr namespace; the prefix is stripped here.
+	// Plain `user.*` xattrs written by other tooling are not reflected.
+	Metadata      map[string]string `protobuf:"bytes,11,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -598,6 +602,13 @@ func (x *EntryInfo) GetSymlinkTarget() string {
 	return ""
 }
 
+func (x *EntryInfo) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
 type ListDirRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -695,11 +706,16 @@ func (x *ListDirResponse) GetEntries() []*EntryInfo {
 }
 
 type WatchDirRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Recursive     bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Path      string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Recursive bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
+	// If true, each FilesystemEvent includes the EntryInfo of the affected entry, when available.
+	IncludeEntry bool `protobuf:"varint,3,opt,name=include_entry,json=includeEntry,proto3" json:"include_entry,omitempty"`
+	// If true, allows watching paths on network filesystem mounts (NFS, CIFS, SMB, FUSE).
+	// Events on network mounts may be unreliable or not delivered at all.
+	AllowNetworkMounts bool `protobuf:"varint,4,opt,name=allow_network_mounts,json=allowNetworkMounts,proto3" json:"allow_network_mounts,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WatchDirRequest) Reset() {
@@ -746,10 +762,28 @@ func (x *WatchDirRequest) GetRecursive() bool {
 	return false
 }
 
+func (x *WatchDirRequest) GetIncludeEntry() bool {
+	if x != nil {
+		return x.IncludeEntry
+	}
+	return false
+}
+
+func (x *WatchDirRequest) GetAllowNetworkMounts() bool {
+	if x != nil {
+		return x.AllowNetworkMounts
+	}
+	return false
+}
+
 type FilesystemEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          EventType              `protobuf:"varint,2,opt,name=type,proto3,enum=filesystem.EventType" json:"type,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type  EventType              `protobuf:"varint,2,opt,name=type,proto3,enum=filesystem.EventType" json:"type,omitempty"`
+	// Info of the entry that triggered the event. Only populated when include_entry
+	// was requested and the entry could be stat-ed (e.g. not set for remove/rename-away
+	// events, where the entry no longer exists at this path).
+	Entry         *EntryInfo `protobuf:"bytes,3,opt,name=entry,proto3,oneof" json:"entry,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -796,6 +830,13 @@ func (x *FilesystemEvent) GetType() EventType {
 		return x.Type
 	}
 	return EventType_EVENT_TYPE_UNSPECIFIED
+}
+
+func (x *FilesystemEvent) GetEntry() *EntryInfo {
+	if x != nil {
+		return x.Entry
+	}
+	return nil
 }
 
 type WatchDirResponse struct {
@@ -897,11 +938,16 @@ func (*WatchDirResponse_Filesystem) isWatchDirResponse_Event() {}
 func (*WatchDirResponse_Keepalive) isWatchDirResponse_Event() {}
 
 type CreateWatcherRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Recursive     bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Path      string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Recursive bool                   `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
+	// If true, each FilesystemEvent includes the EntryInfo of the affected entry, when available.
+	IncludeEntry bool `protobuf:"varint,3,opt,name=include_entry,json=includeEntry,proto3" json:"include_entry,omitempty"`
+	// If true, allows watching paths on network filesystem mounts (NFS, CIFS, SMB, FUSE).
+	// Events on network mounts may be unreliable or not delivered at all.
+	AllowNetworkMounts bool `protobuf:"varint,4,opt,name=allow_network_mounts,json=allowNetworkMounts,proto3" json:"allow_network_mounts,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *CreateWatcherRequest) Reset() {
@@ -944,6 +990,20 @@ func (x *CreateWatcherRequest) GetPath() string {
 func (x *CreateWatcherRequest) GetRecursive() bool {
 	if x != nil {
 		return x.Recursive
+	}
+	return false
+}
+
+func (x *CreateWatcherRequest) GetIncludeEntry() bool {
+	if x != nil {
+		return x.IncludeEntry
+	}
+	return false
+}
+
+func (x *CreateWatcherRequest) GetAllowNetworkMounts() bool {
+	if x != nil {
+		return x.AllowNetworkMounts
 	}
 	return false
 }
@@ -1168,7 +1228,7 @@ type WatchDirResponse_StartEvent struct {
 
 func (x *WatchDirResponse_StartEvent) Reset() {
 	*x = WatchDirResponse_StartEvent{}
-	mi := &file_envd_filesystem_filesystem_proto_msgTypes[20]
+	mi := &file_envd_filesystem_filesystem_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1180,7 +1240,7 @@ func (x *WatchDirResponse_StartEvent) String() string {
 func (*WatchDirResponse_StartEvent) ProtoMessage() {}
 
 func (x *WatchDirResponse_StartEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_envd_filesystem_filesystem_proto_msgTypes[20]
+	mi := &file_envd_filesystem_filesystem_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1264,7 @@ type WatchDirResponse_KeepAlive struct {
 
 func (x *WatchDirResponse_KeepAlive) Reset() {
 	*x = WatchDirResponse_KeepAlive{}
-	mi := &file_envd_filesystem_filesystem_proto_msgTypes[21]
+	mi := &file_envd_filesystem_filesystem_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1216,7 +1276,7 @@ func (x *WatchDirResponse_KeepAlive) String() string {
 func (*WatchDirResponse_KeepAlive) ProtoMessage() {}
 
 func (x *WatchDirResponse_KeepAlive) ProtoReflect() protoreflect.Message {
-	mi := &file_envd_filesystem_filesystem_proto_msgTypes[21]
+	mi := &file_envd_filesystem_filesystem_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1253,7 +1313,7 @@ const file_envd_filesystem_filesystem_proto_rawDesc = "" +
 	"\vStatRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\";\n" +
 	"\fStatResponse\x12+\n" +
-	"\x05entry\x18\x01 \x01(\v2\x15.filesystem.EntryInfoR\x05entry\"\xd3\x02\n" +
+	"\x05entry\x18\x01 \x01(\v2\x15.filesystem.EntryInfoR\x05entry\"\xd1\x03\n" +
 	"\tEntryInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x14.filesystem.FileTypeR\x04type\x12\x12\n" +
@@ -1265,19 +1325,27 @@ const file_envd_filesystem_filesystem_proto_rawDesc = "" +
 	"\x05group\x18\b \x01(\tR\x05group\x12?\n" +
 	"\rmodified_time\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\fmodifiedTime\x12*\n" +
 	"\x0esymlink_target\x18\n" +
-	" \x01(\tH\x00R\rsymlinkTarget\x88\x01\x01B\x11\n" +
+	" \x01(\tH\x00R\rsymlinkTarget\x88\x01\x01\x12?\n" +
+	"\bmetadata\x18\v \x03(\v2#.filesystem.EntryInfo.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
 	"\x0f_symlink_target\":\n" +
 	"\x0eListDirRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
 	"\x05depth\x18\x02 \x01(\rR\x05depth\"B\n" +
 	"\x0fListDirResponse\x12/\n" +
-	"\aentries\x18\x01 \x03(\v2\x15.filesystem.EntryInfoR\aentries\"C\n" +
+	"\aentries\x18\x01 \x03(\v2\x15.filesystem.EntryInfoR\aentries\"\x9a\x01\n" +
 	"\x0fWatchDirRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
-	"\trecursive\x18\x02 \x01(\bR\trecursive\"P\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\x12#\n" +
+	"\rinclude_entry\x18\x03 \x01(\bR\fincludeEntry\x120\n" +
+	"\x14allow_network_mounts\x18\x04 \x01(\bR\x12allowNetworkMounts\"\x8c\x01\n" +
 	"\x0fFilesystemEvent\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12)\n" +
-	"\x04type\x18\x02 \x01(\x0e2\x15.filesystem.EventTypeR\x04type\"\xfe\x01\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x15.filesystem.EventTypeR\x04type\x120\n" +
+	"\x05entry\x18\x03 \x01(\v2\x15.filesystem.EntryInfoH\x00R\x05entry\x88\x01\x01B\b\n" +
+	"\x06_entry\"\xfe\x01\n" +
 	"\x10WatchDirResponse\x12?\n" +
 	"\x05start\x18\x01 \x01(\v2'.filesystem.WatchDirResponse.StartEventH\x00R\x05start\x12=\n" +
 	"\n" +
@@ -1287,10 +1355,12 @@ const file_envd_filesystem_filesystem_proto_rawDesc = "" +
 	"\n" +
 	"StartEvent\x1a\v\n" +
 	"\tKeepAliveB\a\n" +
-	"\x05event\"H\n" +
+	"\x05event\"\x9f\x01\n" +
 	"\x14CreateWatcherRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
-	"\trecursive\x18\x02 \x01(\bR\trecursive\"6\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\x12#\n" +
+	"\rinclude_entry\x18\x03 \x01(\bR\fincludeEntry\x120\n" +
+	"\x14allow_network_mounts\x18\x04 \x01(\bR\x12allowNetworkMounts\"6\n" +
 	"\x15CreateWatcherResponse\x12\x1d\n" +
 	"\n" +
 	"watcher_id\x18\x01 \x01(\tR\twatcherId\"8\n" +
@@ -1339,7 +1409,7 @@ func file_envd_filesystem_filesystem_proto_rawDescGZIP() []byte {
 }
 
 var file_envd_filesystem_filesystem_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_envd_filesystem_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_envd_filesystem_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_envd_filesystem_filesystem_proto_goTypes = []any{
 	(FileType)(0),                       // 0: filesystem.FileType
 	(EventType)(0),                      // 1: filesystem.EventType
@@ -1363,45 +1433,48 @@ var file_envd_filesystem_filesystem_proto_goTypes = []any{
 	(*GetWatcherEventsResponse)(nil),    // 19: filesystem.GetWatcherEventsResponse
 	(*RemoveWatcherRequest)(nil),        // 20: filesystem.RemoveWatcherRequest
 	(*RemoveWatcherResponse)(nil),       // 21: filesystem.RemoveWatcherResponse
-	(*WatchDirResponse_StartEvent)(nil), // 22: filesystem.WatchDirResponse.StartEvent
-	(*WatchDirResponse_KeepAlive)(nil),  // 23: filesystem.WatchDirResponse.KeepAlive
-	(*timestamppb.Timestamp)(nil),       // 24: google.protobuf.Timestamp
+	nil,                                 // 22: filesystem.EntryInfo.MetadataEntry
+	(*WatchDirResponse_StartEvent)(nil), // 23: filesystem.WatchDirResponse.StartEvent
+	(*WatchDirResponse_KeepAlive)(nil),  // 24: filesystem.WatchDirResponse.KeepAlive
+	(*timestamppb.Timestamp)(nil),       // 25: google.protobuf.Timestamp
 }
 var file_envd_filesystem_filesystem_proto_depIdxs = []int32{
 	10, // 0: filesystem.MoveResponse.entry:type_name -> filesystem.EntryInfo
 	10, // 1: filesystem.MakeDirResponse.entry:type_name -> filesystem.EntryInfo
 	10, // 2: filesystem.StatResponse.entry:type_name -> filesystem.EntryInfo
 	0,  // 3: filesystem.EntryInfo.type:type_name -> filesystem.FileType
-	24, // 4: filesystem.EntryInfo.modified_time:type_name -> google.protobuf.Timestamp
-	10, // 5: filesystem.ListDirResponse.entries:type_name -> filesystem.EntryInfo
-	1,  // 6: filesystem.FilesystemEvent.type:type_name -> filesystem.EventType
-	22, // 7: filesystem.WatchDirResponse.start:type_name -> filesystem.WatchDirResponse.StartEvent
-	14, // 8: filesystem.WatchDirResponse.filesystem:type_name -> filesystem.FilesystemEvent
-	23, // 9: filesystem.WatchDirResponse.keepalive:type_name -> filesystem.WatchDirResponse.KeepAlive
-	14, // 10: filesystem.GetWatcherEventsResponse.events:type_name -> filesystem.FilesystemEvent
-	8,  // 11: filesystem.Filesystem.Stat:input_type -> filesystem.StatRequest
-	4,  // 12: filesystem.Filesystem.MakeDir:input_type -> filesystem.MakeDirRequest
-	2,  // 13: filesystem.Filesystem.Move:input_type -> filesystem.MoveRequest
-	11, // 14: filesystem.Filesystem.ListDir:input_type -> filesystem.ListDirRequest
-	6,  // 15: filesystem.Filesystem.Remove:input_type -> filesystem.RemoveRequest
-	13, // 16: filesystem.Filesystem.WatchDir:input_type -> filesystem.WatchDirRequest
-	16, // 17: filesystem.Filesystem.CreateWatcher:input_type -> filesystem.CreateWatcherRequest
-	18, // 18: filesystem.Filesystem.GetWatcherEvents:input_type -> filesystem.GetWatcherEventsRequest
-	20, // 19: filesystem.Filesystem.RemoveWatcher:input_type -> filesystem.RemoveWatcherRequest
-	9,  // 20: filesystem.Filesystem.Stat:output_type -> filesystem.StatResponse
-	5,  // 21: filesystem.Filesystem.MakeDir:output_type -> filesystem.MakeDirResponse
-	3,  // 22: filesystem.Filesystem.Move:output_type -> filesystem.MoveResponse
-	12, // 23: filesystem.Filesystem.ListDir:output_type -> filesystem.ListDirResponse
-	7,  // 24: filesystem.Filesystem.Remove:output_type -> filesystem.RemoveResponse
-	15, // 25: filesystem.Filesystem.WatchDir:output_type -> filesystem.WatchDirResponse
-	17, // 26: filesystem.Filesystem.CreateWatcher:output_type -> filesystem.CreateWatcherResponse
-	19, // 27: filesystem.Filesystem.GetWatcherEvents:output_type -> filesystem.GetWatcherEventsResponse
-	21, // 28: filesystem.Filesystem.RemoveWatcher:output_type -> filesystem.RemoveWatcherResponse
-	20, // [20:29] is the sub-list for method output_type
-	11, // [11:20] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	25, // 4: filesystem.EntryInfo.modified_time:type_name -> google.protobuf.Timestamp
+	22, // 5: filesystem.EntryInfo.metadata:type_name -> filesystem.EntryInfo.MetadataEntry
+	10, // 6: filesystem.ListDirResponse.entries:type_name -> filesystem.EntryInfo
+	1,  // 7: filesystem.FilesystemEvent.type:type_name -> filesystem.EventType
+	10, // 8: filesystem.FilesystemEvent.entry:type_name -> filesystem.EntryInfo
+	23, // 9: filesystem.WatchDirResponse.start:type_name -> filesystem.WatchDirResponse.StartEvent
+	14, // 10: filesystem.WatchDirResponse.filesystem:type_name -> filesystem.FilesystemEvent
+	24, // 11: filesystem.WatchDirResponse.keepalive:type_name -> filesystem.WatchDirResponse.KeepAlive
+	14, // 12: filesystem.GetWatcherEventsResponse.events:type_name -> filesystem.FilesystemEvent
+	8,  // 13: filesystem.Filesystem.Stat:input_type -> filesystem.StatRequest
+	4,  // 14: filesystem.Filesystem.MakeDir:input_type -> filesystem.MakeDirRequest
+	2,  // 15: filesystem.Filesystem.Move:input_type -> filesystem.MoveRequest
+	11, // 16: filesystem.Filesystem.ListDir:input_type -> filesystem.ListDirRequest
+	6,  // 17: filesystem.Filesystem.Remove:input_type -> filesystem.RemoveRequest
+	13, // 18: filesystem.Filesystem.WatchDir:input_type -> filesystem.WatchDirRequest
+	16, // 19: filesystem.Filesystem.CreateWatcher:input_type -> filesystem.CreateWatcherRequest
+	18, // 20: filesystem.Filesystem.GetWatcherEvents:input_type -> filesystem.GetWatcherEventsRequest
+	20, // 21: filesystem.Filesystem.RemoveWatcher:input_type -> filesystem.RemoveWatcherRequest
+	9,  // 22: filesystem.Filesystem.Stat:output_type -> filesystem.StatResponse
+	5,  // 23: filesystem.Filesystem.MakeDir:output_type -> filesystem.MakeDirResponse
+	3,  // 24: filesystem.Filesystem.Move:output_type -> filesystem.MoveResponse
+	12, // 25: filesystem.Filesystem.ListDir:output_type -> filesystem.ListDirResponse
+	7,  // 26: filesystem.Filesystem.Remove:output_type -> filesystem.RemoveResponse
+	15, // 27: filesystem.Filesystem.WatchDir:output_type -> filesystem.WatchDirResponse
+	17, // 28: filesystem.Filesystem.CreateWatcher:output_type -> filesystem.CreateWatcherResponse
+	19, // 29: filesystem.Filesystem.GetWatcherEvents:output_type -> filesystem.GetWatcherEventsResponse
+	21, // 30: filesystem.Filesystem.RemoveWatcher:output_type -> filesystem.RemoveWatcherResponse
+	22, // [22:31] is the sub-list for method output_type
+	13, // [13:22] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_envd_filesystem_filesystem_proto_init() }
@@ -1410,6 +1483,7 @@ func file_envd_filesystem_filesystem_proto_init() {
 		return
 	}
 	file_envd_filesystem_filesystem_proto_msgTypes[8].OneofWrappers = []any{}
+	file_envd_filesystem_filesystem_proto_msgTypes[12].OneofWrappers = []any{}
 	file_envd_filesystem_filesystem_proto_msgTypes[13].OneofWrappers = []any{
 		(*WatchDirResponse_Start)(nil),
 		(*WatchDirResponse_Filesystem)(nil),
@@ -1421,7 +1495,7 @@ func file_envd_filesystem_filesystem_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_envd_filesystem_filesystem_proto_rawDesc), len(file_envd_filesystem_filesystem_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

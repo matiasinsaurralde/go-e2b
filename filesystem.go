@@ -4,30 +4,52 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"connectrpc.com/connect"
+
+	filesystempb "github.com/matiasinsaurralde/go-e2b/internal/gen/envd/filesystem"
+	"github.com/matiasinsaurralde/go-e2b/internal/gen/envd/filesystem/filesystemconnect"
 )
 
 const filesRoute = "/files"
 
 // FileInfo describes a file written to the sandbox filesystem.
 type FileInfo struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Type string `json:"type,omitempty"`
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Type    string    `json:"type,omitempty"`
+	Size    int64     `json:"size,omitempty"`
+	ModTime time.Time `json:"-"`
 }
 
 // FilesystemService provides file read and write operations within a sandbox.
 type FilesystemService struct {
 	sandbox *Sandbox
+
+	fsClientOnce sync.Once
+	fsClient     filesystemconnect.FilesystemClient
 }
 
 func newFilesystemService(sbx *Sandbox) *FilesystemService {
 	return &FilesystemService{sandbox: sbx}
+}
+
+func (f *FilesystemService) getFilesystemClient() filesystemconnect.FilesystemClient {
+	f.fsClientOnce.Do(func() {
+		f.fsClient = filesystemconnect.NewFilesystemClient(
+			f.sandbox.client.httpClient,
+			f.sandbox.envdBaseURL(),
+		)
+	})
+	return f.fsClient
 }
 
 // ReadOption configures a Read, ReadBytes, or ReadString call.
@@ -227,4 +249,334 @@ func (f *FilesystemService) fileURL(path, user string) (string, error) {
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// newRPCRequest creates a Connect RPC request with the sandbox access token
+// and optional user header. For gRPC operations, user context is passed via
+// the X-User-ID header (same as Python SDK's authentication_header()).
+func newRPCRequest[T any](accessToken string, msg *T, user string) *connect.Request[T] {
+	req := connect.NewRequest(msg)
+	req.Header().Set("X-Access-Token", accessToken)
+	if user != "" {
+		req.Header().Set("X-User-ID", user)
+	}
+	return req
+}
+
+// ===== List — list directory contents =====
+//
+// Uses the Filesystem/ListDir gRPC endpoint to enumerate directory entries.
+func (f *FilesystemService) List(ctx context.Context, path string, opts ...ReadOption) ([]FileInfo, error) {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	req := newRPCRequest(f.sandbox.accessToken, &filesystempb.ListDirRequest{
+		Path:  path,
+		Depth: 1,
+	}, rc.user)
+
+	resp, err := f.getFilesystemClient().ListDir(ctx, req)
+	if err != nil {
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			return nil, &FileNotFoundError{Path: path}
+		}
+		return nil, fmt.Errorf("e2b: list: %w", err)
+	}
+
+	entries := make([]FileInfo, len(resp.Msg.Entries))
+	for i, e := range resp.Msg.Entries {
+		entries[i] = entryToFileInfo(e)
+	}
+	return entries, nil
+}
+
+// ===== Stat — get single file/dir metadata =====
+//
+// Uses the Filesystem/Stat gRPC endpoint.
+func (f *FilesystemService) Stat(ctx context.Context, path string, opts ...ReadOption) (*FileInfo, error) {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	req := newRPCRequest(f.sandbox.accessToken, &filesystempb.StatRequest{
+		Path: path,
+	}, rc.user)
+
+	resp, err := f.getFilesystemClient().Stat(ctx, req)
+	if err != nil {
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			return nil, &FileNotFoundError{Path: path}
+		}
+		return nil, fmt.Errorf("e2b: stat: %w", err)
+	}
+
+	info := entryToFileInfo(resp.Msg.Entry)
+	return &info, nil
+}
+
+// Exists checks whether a file or directory exists at path.
+// Corresponds to Python SDK's files.exists().
+// Returns false (not an error) when the path is not found.
+func (f *FilesystemService) Exists(ctx context.Context, path string, opts ...ReadOption) (bool, error) {
+	_, err := f.Stat(ctx, path, opts...)
+	if err != nil {
+		var fnf *FileNotFoundError
+		if errors.As(err, &fnf) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ===== MakeDir — create directory =====
+//
+// Uses the Filesystem/MakeDir gRPC endpoint.
+// Creates directories recursively (mkdir -p semantics).
+// Returns true if the directory was created, false if it already exists.
+func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...WriteOption) (bool, error) {
+	wc := &writeConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyWrite(wc)
+	}
+
+	if wc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wc.timeout)
+		defer cancel()
+	}
+
+	req := newRPCRequest(f.sandbox.accessToken, &filesystempb.MakeDirRequest{
+		Path: path,
+	}, wc.user)
+
+	_, err := f.getFilesystemClient().MakeDir(ctx, req)
+	if err != nil {
+		if connect.CodeOf(err) == connect.CodeAlreadyExists {
+			return false, nil
+		}
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			return false, &FileNotFoundError{Path: path}
+		}
+		return false, fmt.Errorf("e2b: mkdir: %w", err)
+	}
+	return true, nil
+}
+
+// ===== Remove — delete file or dir =====
+//
+// Uses the Filesystem/Remove gRPC endpoint.
+// When deleting a directory it is recursively deleted.
+func (f *FilesystemService) Remove(ctx context.Context, path string, opts ...ReadOption) error {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	req := newRPCRequest(f.sandbox.accessToken, &filesystempb.RemoveRequest{
+		Path: path,
+	}, rc.user)
+
+	_, err := f.getFilesystemClient().Remove(ctx, req)
+	if err != nil {
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			return &FileNotFoundError{Path: path}
+		}
+		return fmt.Errorf("e2b: remove: %w", err)
+	}
+	return nil
+}
+
+// ===== Rename — rename/move file or directory =====
+//
+// Uses the Filesystem/Move gRPC endpoint.
+// Corresponds to Python SDK's files.rename().
+func (f *FilesystemService) Rename(ctx context.Context, oldPath, newPath string, opts ...WriteOption) (*FileInfo, error) {
+	wc := &writeConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyWrite(wc)
+	}
+
+	if wc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wc.timeout)
+		defer cancel()
+	}
+
+	req := newRPCRequest(f.sandbox.accessToken, &filesystempb.MoveRequest{
+		Source:      oldPath,
+		Destination: newPath,
+	}, wc.user)
+
+	resp, err := f.getFilesystemClient().Move(ctx, req)
+	if err != nil {
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			return nil, &FileNotFoundError{Path: oldPath}
+		}
+		return nil, fmt.Errorf("e2b: rename: %w", err)
+	}
+
+	info := entryToFileInfo(resp.Msg.Entry)
+	return &info, nil
+}
+
+// ===== WatchDir — watch directory for filesystem events =====
+//
+// Uses the non-streaming CreateWatcher + GetWatcherEvents RPCs (sync polling approach).
+// Returns a WatchHandle that can be used to get events and stop watching.
+func (f *FilesystemService) WatchDir(ctx context.Context, path string, recursive bool, opts ...ReadOption) (*WatchHandle, error) {
+	rc := &readConfig{timeout: DefaultCommandTimeout}
+	for _, o := range opts {
+		o.applyRead(rc)
+	}
+
+	if rc.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, rc.timeout)
+		defer cancel()
+	}
+
+	createReq := newRPCRequest(f.sandbox.accessToken, &filesystempb.CreateWatcherRequest{
+		Path:      path,
+		Recursive: recursive,
+	}, rc.user)
+
+	createResp, err := f.getFilesystemClient().CreateWatcher(ctx, createReq)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: watch dir: %w", err)
+	}
+
+	return &WatchHandle{
+		watcherID: createResp.Msg.WatcherId,
+		fs:        f,
+	}, nil
+}
+
+// WatchHandle represents an active directory watcher.
+// Use GetEvents to poll for new events and Stop to stop watching.
+type WatchHandle struct {
+	watcherID string
+	fs        *FilesystemService
+	stopped   bool
+}
+
+// GetEvents retrieves new filesystem events since the last call.
+// Returns an empty slice if no events occurred.
+func (w *WatchHandle) GetEvents(ctx context.Context) ([]FilesystemEvent, error) {
+	if w.stopped {
+		return nil, fmt.Errorf("e2b: watcher already stopped")
+	}
+
+	req := newRPCRequest(w.fs.sandbox.accessToken, &filesystempb.GetWatcherEventsRequest{
+		WatcherId: w.watcherID,
+	}, "")
+
+	resp, err := w.fs.getFilesystemClient().GetWatcherEvents(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: get watcher events: %w", err)
+	}
+
+	events := make([]FilesystemEvent, len(resp.Msg.Events))
+	for i, e := range resp.Msg.Events {
+		events[i] = FilesystemEvent{
+			Name: e.Name,
+			Type: eventTypeToString(e.Type),
+		}
+		if e.Entry != nil {
+			info := entryToFileInfo(e.Entry)
+			events[i].Entry = &info
+		}
+	}
+	return events, nil
+}
+
+// Stop stops the directory watcher and releases server-side resources.
+func (w *WatchHandle) Stop(ctx context.Context) error {
+	if w.stopped {
+		return nil
+	}
+
+	req := newRPCRequest(w.fs.sandbox.accessToken, &filesystempb.RemoveWatcherRequest{
+		WatcherId: w.watcherID,
+	}, "")
+
+	_, err := w.fs.getFilesystemClient().RemoveWatcher(ctx, req)
+	if err != nil {
+		return fmt.Errorf("e2b: stop watcher: %w", err)
+	}
+
+	w.stopped = true
+	return nil
+}
+
+// FilesystemEvent represents a filesystem change event.
+type FilesystemEvent struct {
+	Name  string    `json:"name"`
+	Type  string    `json:"type"`
+	Entry *FileInfo `json:"entry,omitempty"`
+}
+
+// eventTypeToString converts a protobuf EventType to a human-readable string.
+func eventTypeToString(t filesystempb.EventType) string {
+	switch t {
+	case filesystempb.EventType_EVENT_TYPE_CREATE:
+		return "create"
+	case filesystempb.EventType_EVENT_TYPE_WRITE:
+		return "write"
+	case filesystempb.EventType_EVENT_TYPE_REMOVE:
+		return "remove"
+	case filesystempb.EventType_EVENT_TYPE_RENAME:
+		return "rename"
+	case filesystempb.EventType_EVENT_TYPE_CHMOD:
+		return "chmod"
+	default:
+		return "unknown"
+	}
+}
+
+// entryToFileInfo converts a protobuf EntryInfo to a FileInfo.
+func entryToFileInfo(e *filesystempb.EntryInfo) FileInfo {
+	info := FileInfo{
+		Name: e.Name,
+		Path: e.Path,
+		Type: fileTypeToString(e.Type),
+		Size: e.Size,
+	}
+	if e.ModifiedTime != nil {
+		info.ModTime = e.ModifiedTime.AsTime()
+	}
+	return info
+}
+
+// fileTypeToString converts a protobuf FileType to a human-readable string.
+func fileTypeToString(t filesystempb.FileType) string {
+	switch t {
+	case filesystempb.FileType_FILE_TYPE_FILE:
+		return "file"
+	case filesystempb.FileType_FILE_TYPE_DIRECTORY:
+		return "directory"
+	default:
+		return "unknown"
+	}
 }
