@@ -27,6 +27,8 @@ type FileInfo struct {
 	Path    string    `json:"path"`
 	Type    string    `json:"type,omitempty"`
 	Size    int64     `json:"size,omitempty"`
+	Owner   string    `json:"owner,omitempty"`
+	Group   string    `json:"group,omitempty"`
 	ModTime time.Time `json:"-"`
 }
 
@@ -347,9 +349,10 @@ func (f *FilesystemService) Exists(ctx context.Context, path string, opts ...Rea
 // ===== MakeDir — create directory =====
 //
 // Uses the Filesystem/MakeDir gRPC endpoint.
-// Creates directories recursively (mkdir -p semantics).
-// Returns true if the directory was created, false if it already exists.
-func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...WriteOption) (bool, error) {
+// Creates directories recursively and is idempotent (mkdir -p semantics):
+// calling it on an existing directory is not an error. envd returns HTTP 200
+// with the entry in that case rather than an AlreadyExists code.
+func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...WriteOption) error {
 	wc := &writeConfig{timeout: DefaultCommandTimeout}
 	for _, o := range opts {
 		o.applyWrite(wc)
@@ -367,15 +370,12 @@ func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...Wr
 
 	_, err := f.getFilesystemClient().MakeDir(ctx, req)
 	if err != nil {
-		if connect.CodeOf(err) == connect.CodeAlreadyExists {
-			return false, nil
-		}
 		if connect.CodeOf(err) == connect.CodeNotFound {
-			return false, &FileNotFoundError{Path: path}
+			return &FileNotFoundError{Path: path}
 		}
-		return false, fmt.Errorf("e2b: mkdir: %w", err)
+		return fmt.Errorf("e2b: mkdir: %w", err)
 	}
-	return true, nil
+	return nil
 }
 
 // ===== Remove — delete file or dir =====
@@ -470,27 +470,36 @@ func (f *FilesystemService) WatchDir(ctx context.Context, path string, recursive
 	return &WatchHandle{
 		watcherID: createResp.Msg.WatcherId,
 		fs:        f,
+		user:      rc.user,
 	}, nil
 }
 
 // WatchHandle represents an active directory watcher.
 // Use GetEvents to poll for new events and Stop to stop watching.
+// A WatchHandle is safe for concurrent use: one goroutine may poll
+// GetEvents while another calls Stop.
 type WatchHandle struct {
 	watcherID string
 	fs        *FilesystemService
-	stopped   bool
+	user      string
+
+	mu      sync.Mutex
+	stopped bool
 }
 
 // GetEvents retrieves new filesystem events since the last call.
 // Returns an empty slice if no events occurred.
 func (w *WatchHandle) GetEvents(ctx context.Context) ([]FilesystemEvent, error) {
-	if w.stopped {
+	w.mu.Lock()
+	stopped := w.stopped
+	w.mu.Unlock()
+	if stopped {
 		return nil, fmt.Errorf("e2b: watcher already stopped")
 	}
 
 	req := newRPCRequest(w.fs.sandbox.accessToken, &filesystempb.GetWatcherEventsRequest{
 		WatcherId: w.watcherID,
-	}, "")
+	}, w.user)
 
 	resp, err := w.fs.getFilesystemClient().GetWatcherEvents(ctx, req)
 	if err != nil {
@@ -512,14 +521,17 @@ func (w *WatchHandle) GetEvents(ctx context.Context) ([]FilesystemEvent, error) 
 }
 
 // Stop stops the directory watcher and releases server-side resources.
+// Stop is idempotent and safe to call concurrently with GetEvents.
 func (w *WatchHandle) Stop(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.stopped {
 		return nil
 	}
 
 	req := newRPCRequest(w.fs.sandbox.accessToken, &filesystempb.RemoveWatcherRequest{
 		WatcherId: w.watcherID,
-	}, "")
+	}, w.user)
 
 	_, err := w.fs.getFilesystemClient().RemoveWatcher(ctx, req)
 	if err != nil {
@@ -556,12 +568,19 @@ func eventTypeToString(t filesystempb.EventType) string {
 }
 
 // entryToFileInfo converts a protobuf EntryInfo to a FileInfo.
+// A nil entry yields a zero FileInfo so callers never panic on a
+// success response that unexpectedly omits the entry.
 func entryToFileInfo(e *filesystempb.EntryInfo) FileInfo {
+	if e == nil {
+		return FileInfo{}
+	}
 	info := FileInfo{
-		Name: e.Name,
-		Path: e.Path,
-		Type: fileTypeToString(e.Type),
-		Size: e.Size,
+		Name:  e.Name,
+		Path:  e.Path,
+		Type:  fileTypeToString(e.Type),
+		Size:  e.Size,
+		Owner: e.Owner,
+		Group: e.Group,
 	}
 	if e.ModifiedTime != nil {
 		info.ModTime = e.ModifiedTime.AsTime()
