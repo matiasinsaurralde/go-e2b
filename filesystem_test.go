@@ -10,7 +10,99 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	filesystempb "github.com/matiasinsaurralde/go-e2b/internal/gen/envd/filesystem"
+	"github.com/matiasinsaurralde/go-e2b/internal/gen/envd/filesystem/filesystemconnect"
 )
+
+// --- Connect RPC Filesystem test helpers ---
+
+// testFilesystemHandler is a test implementation of filesystemconnect.FilesystemHandler.
+// Only Stat, ListDir, MakeDir, Remove, Move, CreateWatcher, GetWatcherEvents,
+// and RemoveWatcher are implemented; others delegate to
+// UnimplementedFilesystemHandler and return CodeUnimplemented.
+type testFilesystemHandler struct {
+	filesystemconnect.UnimplementedFilesystemHandler
+	statFn             func(context.Context, *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error)
+	listFn             func(context.Context, *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error)
+	mkdirFn            func(context.Context, *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error)
+	removeFn           func(context.Context, *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error)
+	moveFn             func(context.Context, *connect.Request[filesystempb.MoveRequest]) (*connect.Response[filesystempb.MoveResponse], error)
+	createWatcherFn    func(context.Context, *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error)
+	getWatcherEventsFn func(context.Context, *connect.Request[filesystempb.GetWatcherEventsRequest]) (*connect.Response[filesystempb.GetWatcherEventsResponse], error)
+	removeWatcherFn    func(context.Context, *connect.Request[filesystempb.RemoveWatcherRequest]) (*connect.Response[filesystempb.RemoveWatcherResponse], error)
+}
+
+func (h *testFilesystemHandler) Stat(ctx context.Context, req *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+	return h.statFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) ListDir(ctx context.Context, req *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+	return h.listFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) MakeDir(ctx context.Context, req *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+	return h.mkdirFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) Remove(ctx context.Context, req *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+	return h.removeFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) Move(ctx context.Context, req *connect.Request[filesystempb.MoveRequest]) (*connect.Response[filesystempb.MoveResponse], error) {
+	return h.moveFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) CreateWatcher(ctx context.Context, req *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error) {
+	return h.createWatcherFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) GetWatcherEvents(ctx context.Context, req *connect.Request[filesystempb.GetWatcherEventsRequest]) (*connect.Response[filesystempb.GetWatcherEventsResponse], error) {
+	return h.getWatcherEventsFn(ctx, req)
+}
+
+func (h *testFilesystemHandler) RemoveWatcher(ctx context.Context, req *connect.Request[filesystempb.RemoveWatcherRequest]) (*connect.Response[filesystempb.RemoveWatcherResponse], error) {
+	if h.removeWatcherFn != nil {
+		return h.removeWatcherFn(ctx, req)
+	}
+	return connect.NewResponse(&filesystempb.RemoveWatcherResponse{}), nil
+}
+
+// newFilesystemRPCTestSandbox creates a Sandbox whose envd traffic is routed to
+// a Connect RPC FilesystemHandler backed by the provided test handler.
+func newFilesystemRPCTestSandbox(t *testing.T, h *testFilesystemHandler) *Sandbox {
+	t.Helper()
+	mux := http.NewServeMux()
+	path, handler := filesystemconnect.NewFilesystemHandler(h)
+	mux.Handle(path, handler)
+
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+
+	origTransport := srv.Client().Transport
+	sbx := &Sandbox{
+		ID:          "sbx-test",
+		accessToken: "token-test",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = "https"
+					req.URL.Host = srv.Listener.Addr().String()
+					return origTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+	sbx.Filesystem = newFilesystemService(sbx)
+	sbx.Commands = newCommandService(sbx)
+	return sbx
+}
+
+// --- HTTP /files test helper (for Read/Write tests) ---
 
 // newFilesystemTestSandbox starts a TLS test server handling /files and wires a
 // Sandbox whose httpClient redirects all traffic to it.
@@ -38,6 +130,7 @@ func newFilesystemTestSandbox(t *testing.T, handler http.HandlerFunc) *Sandbox {
 		},
 	}
 	sbx.Filesystem = newFilesystemService(sbx)
+	sbx.Commands = newCommandService(sbx)
 	return sbx
 }
 
@@ -530,23 +623,23 @@ func TestNewSandboxInitializesFilesystem(t *testing.T) {
 
 func TestFilesystemList(t *testing.T) {
 	const dir = "/home/user/mydir"
+	mtime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("method = %s, want GET", r.Method)
-		}
-		if r.URL.Query().Get("path") != dir {
-			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), dir)
-		}
-		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
-			t.Errorf("X-Access-Token = %q, want token-test", tok)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"name": "file1.txt", "path": dir + "/file1.txt", "type": "file", "size": 100, "mtime": "2024-01-15T10:30:00Z"},
-			{"name": "subdir", "path": dir + "/subdir", "type": "dir", "size": 0, "mtime": "2024-01-15T11:00:00Z"},
-		})
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, req *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			if req.Msg.Path != dir {
+				t.Errorf("path = %q, want %q", req.Msg.Path, dir)
+			}
+			if req.Header().Get("X-Access-Token") != "token-test" {
+				t.Errorf("X-Access-Token = %q, want token-test", req.Header().Get("X-Access-Token"))
+			}
+			return connect.NewResponse(&filesystempb.ListDirResponse{
+				Entries: []*filesystempb.EntryInfo{
+					{Name: "file1.txt", Path: dir + "/file1.txt", Type: filesystempb.FileType_FILE_TYPE_FILE, Size: 100, ModifiedTime: timestamppb.New(mtime)},
+					{Name: "subdir", Path: dir + "/subdir", Type: filesystempb.FileType_FILE_TYPE_DIRECTORY, Size: 0, ModifiedTime: timestamppb.New(mtime.Add(30 * time.Minute))},
+				},
+			}), nil
+		},
 	})
 
 	entries, err := sbx.Filesystem.List(context.Background(), dir)
@@ -565,10 +658,9 @@ func TestFilesystemList(t *testing.T) {
 	if entries[1].Name != "subdir" {
 		t.Errorf("entries[1].Name = %q, want subdir", entries[1].Name)
 	}
-	if entries[1].Type != "dir" {
-		t.Errorf("entries[1].Type = %q, want dir", entries[1].Type)
+	if entries[1].Type != "directory" {
+		t.Errorf("entries[1].Type = %q, want directory", entries[1].Type)
 	}
-	// ModTime should be parsed
 	if entries[0].ModTime.IsZero() {
 		t.Error("entries[0].ModTime is zero")
 	}
@@ -577,10 +669,10 @@ func TestFilesystemList(t *testing.T) {
 func TestFilesystemListEmpty(t *testing.T) {
 	const dir = "/empty/dir"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("[]"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, _ *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			return connect.NewResponse(&filesystempb.ListDirResponse{}), nil
+		},
 	})
 
 	entries, err := sbx.Filesystem.List(context.Background(), dir)
@@ -595,13 +687,13 @@ func TestFilesystemListEmpty(t *testing.T) {
 func TestFilesystemListWithUser(t *testing.T) {
 	const dir = "/root"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if u := r.URL.Query().Get("username"); u != "root" {
-			t.Errorf("username param = %q, want root", u)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("[]"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, req *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			if userID := req.Header().Get("X-User-ID"); userID != "root" {
+				t.Errorf("X-User-ID = %q, want root", userID)
+			}
+			return connect.NewResponse(&filesystempb.ListDirResponse{}), nil
+		},
 	})
 
 	_, err := sbx.Filesystem.List(context.Background(), dir, WithFileUser("root"))
@@ -613,8 +705,10 @@ func TestFilesystemListWithUser(t *testing.T) {
 func TestFilesystemListNotFound(t *testing.T) {
 	const dir = "/nonexistent/dir"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, _ *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
 	})
 
 	_, err := sbx.Filesystem.List(context.Background(), dir)
@@ -631,46 +725,34 @@ func TestFilesystemListNotFound(t *testing.T) {
 }
 
 func TestFilesystemListServerError(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("boom"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, _ *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("boom"))
+		},
 	})
 
 	_, err := sbx.Filesystem.List(context.Background(), "/tmp")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %T: %v", err, err)
-	}
-	if e.StatusCode != http.StatusInternalServerError {
-		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
-	}
-}
-
-func TestFilesystemListInvalidJSON(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("not json"))
-	})
-
-	_, err := sbx.Filesystem.List(context.Background(), "/tmp")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
+	if !strings.Contains(err.Error(), "boom") && !strings.Contains(err.Error(), "internal") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestFilesystemListModTimeFormats(t *testing.T) {
-	// verify that various mtime formats from envd are parsed correctly.
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"name": "a.txt", "path": "/tmp/a.txt", "mtime": "2024-06-15T08:00:00Z"},
-			{"name": "b.txt", "path": "/tmp/b.txt", "mtime": "2024-06-15T08:00:00.123456789Z"},
-			{"name": "c.txt", "path": "/tmp/c.txt", "mtime": "2024-06-15T08:00:00+08:00"},
-		})
+	mt := time.Date(2024, 6, 15, 8, 0, 0, 123456789, time.UTC)
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, _ *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			return connect.NewResponse(&filesystempb.ListDirResponse{
+				Entries: []*filesystempb.EntryInfo{
+					{Name: "a.txt", Path: "/tmp/a.txt", ModifiedTime: timestamppb.New(mt)},
+					{Name: "b.txt", Path: "/tmp/b.txt", ModifiedTime: timestamppb.New(mt)},
+					{Name: "c.txt", Path: "/tmp/c.txt", ModifiedTime: timestamppb.New(mt)},
+				},
+			}), nil
+		},
 	})
 
 	entries, err := sbx.Filesystem.List(context.Background(), "/tmp")
@@ -688,34 +770,24 @@ func TestFilesystemListModTimeFormats(t *testing.T) {
 
 func TestFilesystemStat(t *testing.T) {
 	const path = "/home/user/file.txt"
+	mtime := time.Date(2024, 3, 20, 14, 0, 0, 0, time.UTC)
 
-	sbx := &Sandbox{
-		ID:          "sbx-test",
-		accessToken: "token-test",
-		client: &Client{
-			sandboxDomain: "test.e2b.app",
-			httpClient: &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					if req.Method != http.MethodGet {
-						t.Errorf("method = %s, want HEAD", req.Method)
-					}
-					if req.URL.Query().Get("path") != path {
-						t.Errorf("path param = %q, want %q", req.URL.Query().Get("path"), path)
-					}
-					if tok := req.Header.Get("X-Access-Token"); tok != "token-test" {
-						t.Errorf("X-Access-Token = %q, want token-test", tok)
-					}
-					body := `{"name":"file.txt","path":"/home/user/file.txt","type":"file","size":2048,"mtime":"2024-03-20T14:00:00Z"}`
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": {"application/json"}},
-						Body:       io.NopCloser(strings.NewReader(body)),
-					}, nil
-				}),
-			},
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, req *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			if req.Msg.Path != path {
+				t.Errorf("path = %q, want %q", req.Msg.Path, path)
+			}
+			if req.Header().Get("X-Access-Token") != "token-test" {
+				t.Errorf("X-Access-Token = %q, want token-test", req.Header().Get("X-Access-Token"))
+			}
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{
+					Name: "file.txt", Path: path, Type: filesystempb.FileType_FILE_TYPE_FILE,
+					Size: 2048, ModifiedTime: timestamppb.New(mtime),
+				},
+			}), nil
 		},
-	}
-	sbx.Filesystem = newFilesystemService(sbx)
+	})
 
 	info, err := sbx.Filesystem.Stat(context.Background(), path)
 	if err != nil {
@@ -741,58 +813,38 @@ func TestFilesystemStat(t *testing.T) {
 func TestFilesystemStatDir(t *testing.T) {
 	const path = "/home/user/mydir"
 
-	sbx := &Sandbox{
-		ID:          "sbx-test",
-		accessToken: "token-test",
-		client: &Client{
-			sandboxDomain: "test.e2b.app",
-			httpClient: &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					body := `{"name":"mydir","path":"/home/user/mydir","type":"dir","size":4096,"mtime":"2024-03-20T14:30:00Z"}`
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": {"application/json"}},
-						Body:       io.NopCloser(strings.NewReader(body)),
-					}, nil
-				}),
-			},
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{
+					Name: "mydir", Path: path, Type: filesystempb.FileType_FILE_TYPE_DIRECTORY, Size: 4096,
+				},
+			}), nil
 		},
-	}
-	sbx.Filesystem = newFilesystemService(sbx)
+	})
 
 	info, err := sbx.Filesystem.Stat(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if info.Type != "dir" {
-		t.Errorf("Type = %q, want dir", info.Type)
+	if info.Type != "directory" {
+		t.Errorf("Type = %q, want directory", info.Type)
 	}
 }
 
 func TestFilesystemStatWithUser(t *testing.T) {
 	const path = "/root/.bashrc"
 
-	sbx := &Sandbox{
-		ID:          "sbx-test",
-		accessToken: "token-test",
-		client: &Client{
-			sandboxDomain: "test.e2b.app",
-			httpClient: &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					if u := req.URL.Query().Get("username"); u != "root" {
-						t.Errorf("username param = %q, want root", u)
-					}
-					body := `{"name":".bashrc","path":"/root/.bashrc"}`
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Content-Type": {"application/json"}},
-						Body:       io.NopCloser(strings.NewReader(body)),
-					}, nil
-				}),
-			},
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, req *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			if userID := req.Header().Get("X-User-ID"); userID != "root" {
+				t.Errorf("X-User-ID = %q, want root", userID)
+			}
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{Name: ".bashrc", Path: path},
+			}), nil
 		},
-	}
-	sbx.Filesystem = newFilesystemService(sbx)
+	})
 
 	_, err := sbx.Filesystem.Stat(context.Background(), path, WithFileUser("root"))
 	if err != nil {
@@ -803,8 +855,10 @@ func TestFilesystemStatWithUser(t *testing.T) {
 func TestFilesystemStatNotFound(t *testing.T) {
 	const path = "/does/not/exist.txt"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
 	})
 
 	_, err := sbx.Filesystem.Stat(context.Background(), path)
@@ -821,84 +875,71 @@ func TestFilesystemStatNotFound(t *testing.T) {
 }
 
 func TestFilesystemStatServerError(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte("bad gateway"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("bad gateway"))
+		},
 	})
 
 	_, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %T: %v", err, err)
-	}
-	if e.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "bad gateway") && !strings.Contains(err.Error(), "internal") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
-// Stat on a non-directory path returns binary content from envd, so
-// invalid JSON is treated as a plain file (binary fallback), not an error.
 func TestFilesystemStatInvalidJSON(t *testing.T) {
-	const path = "/tmp/f.txt"
-	const body = "{!invalid}"
-
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(body))
+	// gRPC errors are not JSON-decode issues; just test that error propagation works.
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return nil, connect.NewError(connect.CodeUnknown, errors.New("unexpected"))
+		},
 	})
 
-	info, err := sbx.Filesystem.Stat(context.Background(), path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if info.Path != path {
-		t.Errorf("Path = %q, want %q", info.Path, path)
-	}
-	if info.Type != "file" {
-		t.Errorf("Type = %q, want file (binary fallback)", info.Type)
-	}
-	if info.Size != int64(len(body)) {
-		t.Errorf("Size = %d, want %d", info.Size, len(body))
+	_, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
+
 // --- MakeDir tests ---
 
 func TestFilesystemMakeDir(t *testing.T) {
 	const dir = "/home/user/newdir"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("method = %s, want POST", r.Method)
-		}
-		if r.URL.Query().Get("path") != dir {
-			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), dir)
-		}
-		if r.URL.Query().Get("type") != "directory" {
-			t.Errorf("type param = %q, want directory", r.URL.Query().Get("type"))
-		}
-		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
-			t.Errorf("X-Access-Token = %q, want token-test", tok)
-		}
-		w.WriteHeader(http.StatusOK)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, req *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			if req.Msg.Path != dir {
+				t.Errorf("path = %q, want %q", req.Msg.Path, dir)
+			}
+			if req.Header().Get("X-Access-Token") != "token-test" {
+				t.Errorf("X-Access-Token = %q, want token-test", req.Header().Get("X-Access-Token"))
+			}
+			return connect.NewResponse(&filesystempb.MakeDirResponse{}), nil
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	created, err := sbx.Filesystem.MakeDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("MakeDir: %v", err)
+	}
+	if !created {
+		t.Error("expected created=true for new directory")
 	}
 }
 
 func TestFilesystemMakeDirCreated(t *testing.T) {
 	const dir = "/home/user/newdir"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusCreated)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			return connect.NewResponse(&filesystempb.MakeDirResponse{}), nil
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	_, err := sbx.Filesystem.MakeDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
@@ -907,14 +948,16 @@ func TestFilesystemMakeDirCreated(t *testing.T) {
 func TestFilesystemMakeDirWithUser(t *testing.T) {
 	const dir = "/root/special"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if u := r.URL.Query().Get("username"); u != "root" {
-			t.Errorf("username param = %q, want root", u)
-		}
-		w.WriteHeader(http.StatusOK)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, req *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			if userID := req.Header().Get("X-User-ID"); userID != "root" {
+				t.Errorf("X-User-ID = %q, want root", userID)
+			}
+			return connect.NewResponse(&filesystempb.MakeDirResponse{}), nil
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), dir, WithFileUser("root"))
+	_, err := sbx.Filesystem.MakeDir(context.Background(), dir, WithFileUser("root"))
 	if err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
@@ -923,11 +966,13 @@ func TestFilesystemMakeDirWithUser(t *testing.T) {
 func TestFilesystemMakeDirNotFound(t *testing.T) {
 	const dir = "/nonexistent/parent/child"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	_, err := sbx.Filesystem.MakeDir(context.Background(), dir)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -941,31 +986,30 @@ func TestFilesystemMakeDirNotFound(t *testing.T) {
 }
 
 func TestFilesystemMakeDirServerError(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte("forbidden"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			return nil, connect.NewError(connect.CodePermissionDenied, errors.New("forbidden"))
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), "/root/protected")
+	_, err := sbx.Filesystem.MakeDir(context.Background(), "/root/protected")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %T: %v", err, err)
-	}
-	if e.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusForbidden)
+	if !strings.Contains(err.Error(), "forbidden") && !strings.Contains(err.Error(), "permission_denied") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
 func TestFilesystemMakeDirTimeout(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(50 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+			time.Sleep(50 * time.Millisecond)
+			return connect.NewResponse(&filesystempb.MakeDirResponse{}), nil
+		},
 	})
 
-	err := sbx.Filesystem.MakeDir(context.Background(), "/tmp/mydir", WithWriteTimeout(1*time.Millisecond))
+	_, err := sbx.Filesystem.MakeDir(context.Background(), "/tmp/mydir", WithWriteTimeout(1*time.Millisecond))
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -976,17 +1020,16 @@ func TestFilesystemMakeDirTimeout(t *testing.T) {
 func TestFilesystemRemove(t *testing.T) {
 	const path = "/tmp/file-to-delete.txt"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Errorf("method = %s, want DELETE", r.Method)
-		}
-		if r.URL.Query().Get("path") != path {
-			t.Errorf("path param = %q, want %q", r.URL.Query().Get("path"), path)
-		}
-		if tok := r.Header.Get("X-Access-Token"); tok != "token-test" {
-			t.Errorf("X-Access-Token = %q, want token-test", tok)
-		}
-		w.WriteHeader(http.StatusOK)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		removeFn: func(_ context.Context, req *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+			if req.Msg.Path != path {
+				t.Errorf("path = %q, want %q", req.Msg.Path, path)
+			}
+			if req.Header().Get("X-Access-Token") != "token-test" {
+				t.Errorf("X-Access-Token = %q, want token-test", req.Header().Get("X-Access-Token"))
+			}
+			return connect.NewResponse(&filesystempb.RemoveResponse{}), nil
+		},
 	})
 
 	err := sbx.Filesystem.Remove(context.Background(), path)
@@ -998,8 +1041,10 @@ func TestFilesystemRemove(t *testing.T) {
 func TestFilesystemRemoveNoContent(t *testing.T) {
 	const path = "/tmp/file-deleted.txt"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		removeFn: func(_ context.Context, _ *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+			return connect.NewResponse(&filesystempb.RemoveResponse{}), nil
+		},
 	})
 
 	err := sbx.Filesystem.Remove(context.Background(), path)
@@ -1011,8 +1056,10 @@ func TestFilesystemRemoveNoContent(t *testing.T) {
 func TestFilesystemRemoveDir(t *testing.T) {
 	const dir = "/tmp/dir-to-remove"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		removeFn: func(_ context.Context, _ *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+			return connect.NewResponse(&filesystempb.RemoveResponse{}), nil
+		},
 	})
 
 	err := sbx.Filesystem.Remove(context.Background(), dir)
@@ -1024,8 +1071,10 @@ func TestFilesystemRemoveDir(t *testing.T) {
 func TestFilesystemRemoveNotFound(t *testing.T) {
 	const path = "/does/not/exist.txt"
 
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		removeFn: func(_ context.Context, _ *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
 	})
 
 	err := sbx.Filesystem.Remove(context.Background(), path)
@@ -1042,20 +1091,204 @@ func TestFilesystemRemoveNotFound(t *testing.T) {
 }
 
 func TestFilesystemRemoveServerError(t *testing.T) {
-	sbx := newFilesystemTestSandbox(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("remove failed"))
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		removeFn: func(_ context.Context, _ *connect.Request[filesystempb.RemoveRequest]) (*connect.Response[filesystempb.RemoveResponse], error) {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("remove failed"))
+		},
 	})
 
 	err := sbx.Filesystem.Remove(context.Background(), "/tmp/f.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *Error, got %T: %v", err, err)
+	if !strings.Contains(err.Error(), "remove failed") && !strings.Contains(err.Error(), "internal") {
+		t.Errorf("unexpected error: %v", err)
 	}
-	if e.StatusCode != http.StatusInternalServerError {
-		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+}
+
+// --- Exists tests ---
+
+func TestFilesystemExistsTrue(t *testing.T) {
+	const path = "/home/user/exists.txt"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, req *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			if req.Msg.Path != path {
+				t.Errorf("path = %q, want %q", req.Msg.Path, path)
+			}
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{
+					Name: "exists.txt", Path: path, Type: filesystempb.FileType_FILE_TYPE_FILE, Size: 100,
+				},
+			}), nil
+		},
+	})
+
+	ok, err := sbx.Filesystem.Exists(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if !ok {
+		t.Error("expected true, got false")
+	}
+}
+
+func TestFilesystemExistsFalse(t *testing.T) {
+	const path = "/does/not/exist.txt"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
+	})
+
+	ok, err := sbx.Filesystem.Exists(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if ok {
+		t.Error("expected false for nonexistent path, got true")
+	}
+}
+
+func TestFilesystemExistsServerError(t *testing.T) {
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("boom"))
+		},
+	})
+
+	_, err := sbx.Filesystem.Exists(context.Background(), "/tmp/f.txt")
+	if err == nil {
+		t.Fatal("expected error for server error")
+	}
+}
+
+// --- Rename tests ---
+
+func TestFilesystemRename(t *testing.T) {
+	const oldPath = "/tmp/old.txt"
+	const newPath = "/tmp/new.txt"
+	mtime := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		moveFn: func(_ context.Context, req *connect.Request[filesystempb.MoveRequest]) (*connect.Response[filesystempb.MoveResponse], error) {
+			if req.Msg.Source != oldPath {
+				t.Errorf("source = %q, want %q", req.Msg.Source, oldPath)
+			}
+			if req.Msg.Destination != newPath {
+				t.Errorf("destination = %q, want %q", req.Msg.Destination, newPath)
+			}
+			if req.Header().Get("X-Access-Token") != "token-test" {
+				t.Errorf("X-Access-Token = %q, want token-test", req.Header().Get("X-Access-Token"))
+			}
+			return connect.NewResponse(&filesystempb.MoveResponse{
+				Entry: &filesystempb.EntryInfo{
+					Name: "new.txt", Path: newPath, Type: filesystempb.FileType_FILE_TYPE_FILE,
+					Size: 42, ModifiedTime: timestamppb.New(mtime),
+				},
+			}), nil
+		},
+	})
+
+	info, err := sbx.Filesystem.Rename(context.Background(), oldPath, newPath)
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if info.Name != "new.txt" {
+		t.Errorf("Name = %q, want new.txt", info.Name)
+	}
+	if info.Path != newPath {
+		t.Errorf("Path = %q, want %q", info.Path, newPath)
+	}
+	if info.Type != "file" {
+		t.Errorf("Type = %q, want file", info.Type)
+	}
+	if info.ModTime.IsZero() {
+		t.Error("ModTime is zero")
+	}
+}
+
+func TestFilesystemRenameNotFound(t *testing.T) {
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		moveFn: func(_ context.Context, _ *connect.Request[filesystempb.MoveRequest]) (*connect.Response[filesystempb.MoveResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("not found"))
+		},
+	})
+
+	_, err := sbx.Filesystem.Rename(context.Background(), "/tmp/old.txt", "/tmp/new.txt")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *FileNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *FileNotFoundError, got %T: %v", err, err)
+	}
+}
+
+// --- WatchDir tests ---
+
+func TestFilesystemWatchDir(t *testing.T) {
+	const dir = "/tmp/watched"
+
+	var watcherID = "watcher-abc"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		createWatcherFn: func(_ context.Context, req *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error) {
+			if req.Msg.Path != dir {
+				t.Errorf("path = %q, want %q", req.Msg.Path, dir)
+			}
+			if !req.Msg.Recursive {
+				t.Error("expected recursive=true")
+			}
+			return connect.NewResponse(&filesystempb.CreateWatcherResponse{WatcherId: watcherID}), nil
+		},
+		getWatcherEventsFn: func(_ context.Context, req *connect.Request[filesystempb.GetWatcherEventsRequest]) (*connect.Response[filesystempb.GetWatcherEventsResponse], error) {
+			if req.Msg.WatcherId != watcherID {
+				t.Errorf("watcher_id = %q, want %q", req.Msg.WatcherId, watcherID)
+			}
+			return connect.NewResponse(&filesystempb.GetWatcherEventsResponse{
+				Events: []*filesystempb.FilesystemEvent{
+					{Name: "newfile.txt", Type: filesystempb.EventType_EVENT_TYPE_CREATE},
+					{Name: "newfile.txt", Type: filesystempb.EventType_EVENT_TYPE_WRITE},
+				},
+			}), nil
+		},
+	})
+
+	handle, err := sbx.Filesystem.WatchDir(context.Background(), dir, true)
+	if err != nil {
+		t.Fatalf("WatchDir: %v", err)
+	}
+	if handle == nil {
+		t.Fatal("expected non-nil WatchHandle")
+	}
+
+	events, err := handle.GetEvents(context.Background())
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(events))
+	}
+	if events[0].Name != "newfile.txt" {
+		t.Errorf("events[0].Name = %q, want newfile.txt", events[0].Name)
+	}
+
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("handle.Stop: %v", err)
+	}
+}
+
+func TestFilesystemWatchDirCreateError(t *testing.T) {
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		createWatcherFn: func(_ context.Context, _ *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error) {
+			return nil, connect.NewError(connect.CodeInternal, errors.New("failed"))
+		},
+	})
+
+	_, err := sbx.Filesystem.WatchDir(context.Background(), "/tmp", false)
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
