@@ -85,6 +85,12 @@ func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbo
 		Secure:              cfg.Secure,
 		AllowInternetAccess: cfg.AllowInternetAccess,
 		Network:             cfg.Network,
+		AutoPause:           cfg.AutoPause,
+		AutoPauseMemory:     cfg.AutoPauseMemory,
+		AutoResume:          cfg.AutoResume,
+		Metadata:            cfg.Metadata,
+		MCP:                 cfg.MCP,
+		VolumeMounts:        cfg.VolumeMounts,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("e2b: marshal create request: %w", err)
@@ -231,4 +237,61 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ...ListSnapshotsOption)
 		Snapshots: snapshots,
 		NextToken: resp.Header.Get("X-Next-Token"),
 	}, nil
+}
+
+// connectRequest is the request body for the connect endpoint.
+type connectRequest struct {
+	Timeout int `json:"timeout"`
+}
+
+// Connect attaches to an existing sandbox by ID. If the sandbox is paused,
+// it will be automatically resumed. The timeout sets the new lifetime in
+// seconds from the current time.
+//
+// This is the primary mechanism for reconnecting to sandboxes from different
+// execution contexts or recovering paused sandboxes.
+func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds int) (*Sandbox, error) {
+	body, err := json.Marshal(connectRequest{Timeout: timeoutSeconds})
+	if err != nil {
+		return nil, fmt.Errorf("e2b: marshal connect request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBaseURL+"/sandboxes/"+sandboxID+"/connect", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("e2b: build connect request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: send connect request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		// OK = sandbox was already running, Created = resumed from paused
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, &SandboxNotFoundError{SandboxID: sandboxID}
+		}
+		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+
+	var cr createResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		return nil, fmt.Errorf("e2b: decode connect response: %w", err)
+	}
+
+	sbx := &Sandbox{
+		ID:                 cr.SandboxID,
+		TrafficAccessToken: cr.TrafficAccessToken,
+		accessToken:        cr.EnvdAccessToken,
+		client:             c,
+	}
+	sbx.Commands = newCommandService(sbx)
+	sbx.Filesystem = newFilesystemService(sbx)
+	return sbx, nil
 }
