@@ -3005,7 +3005,7 @@ func TestNewSandboxWithAutoPause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 
 	if sbx.ID != "sbx-123" {
 		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-123")
@@ -3046,7 +3046,7 @@ func TestNewSandboxWithAutoPauseMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 }
 
 func TestNewSandboxWithAutoResume(t *testing.T) {
@@ -3078,7 +3078,7 @@ func TestNewSandboxWithAutoResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 }
 
 func TestNewSandboxWithMetadata(t *testing.T) {
@@ -3113,7 +3113,7 @@ func TestNewSandboxWithMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 }
 
 func TestNewSandboxWithVolumeMounts(t *testing.T) {
@@ -3151,7 +3151,7 @@ func TestNewSandboxWithVolumeMounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 }
 
 func TestNewSandboxFullLifecycleConfig(t *testing.T) {
@@ -3196,7 +3196,7 @@ func TestNewSandboxFullLifecycleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox: %v", err)
 	}
-	defer sbx.Close()
+	defer func() { _ = sbx.Close() }()
 	if sbx.ID != "sbx-full" {
 		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-full")
 	}
