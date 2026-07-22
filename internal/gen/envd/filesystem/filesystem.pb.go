@@ -28,6 +28,7 @@ const (
 	FileType_FILE_TYPE_UNSPECIFIED FileType = 0
 	FileType_FILE_TYPE_FILE        FileType = 1
 	FileType_FILE_TYPE_DIRECTORY   FileType = 2
+	FileType_FILE_TYPE_SYMLINK     FileType = 3
 )
 
 // Enum value maps for FileType.
@@ -36,11 +37,13 @@ var (
 		0: "FILE_TYPE_UNSPECIFIED",
 		1: "FILE_TYPE_FILE",
 		2: "FILE_TYPE_DIRECTORY",
+		3: "FILE_TYPE_SYMLINK",
 	}
 	FileType_value = map[string]int32{
 		"FILE_TYPE_UNSPECIFIED": 0,
 		"FILE_TYPE_FILE":        1,
 		"FILE_TYPE_DIRECTORY":   2,
+		"FILE_TYPE_SYMLINK":     3,
 	}
 )
 
@@ -1372,11 +1375,12 @@ const file_envd_filesystem_filesystem_proto_rawDesc = "" +
 	"\x14RemoveWatcherRequest\x12\x1d\n" +
 	"\n" +
 	"watcher_id\x18\x01 \x01(\tR\twatcherId\"\x17\n" +
-	"\x15RemoveWatcherResponse*R\n" +
+	"\x15RemoveWatcherResponse*i\n" +
 	"\bFileType\x12\x19\n" +
 	"\x15FILE_TYPE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eFILE_TYPE_FILE\x10\x01\x12\x17\n" +
-	"\x13FILE_TYPE_DIRECTORY\x10\x02*\x98\x01\n" +
+	"\x13FILE_TYPE_DIRECTORY\x10\x02\x12\x15\n" +
+	"\x11FILE_TYPE_SYMLINK\x10\x03*\x98\x01\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11EVENT_TYPE_CREATE\x10\x01\x12\x14\n" +
