@@ -34,6 +34,46 @@ type SandboxConfig struct {
 	// If nil, the sandbox uses the default network configuration
 	// (all outbound traffic allowed).
 	Network *NetworkConfig
+
+	// AutoPause automatically pauses the sandbox after the timeout instead
+	// of killing it. When true, the sandbox transitions to paused rather
+	// than being destroyed at expiry.
+	AutoPause bool
+
+	// AutoPauseMemory controls whether auto-pause saves a full memory
+	// snapshot (true, default) or only the filesystem (false).
+	// A filesystem-only snapshot cannot be auto-resumed by traffic.
+	// Only relevant when AutoPause is true.
+	AutoPauseMemory *bool
+
+	// AutoResume configures automatic resuming of paused sandboxes when
+	// they receive inbound traffic. Only works with full-memory snapshots
+	// (AutoPauseMemory=true or unset).
+	AutoResume *AutoResumeConfig
+
+	// Metadata is a set of key-value pairs attached to the sandbox for
+	// filtering and organization.
+	Metadata map[string]string
+
+	// MCP configures the MCP (Model Context Protocol) gateway for the sandbox.
+	MCP *MCPConfig
+
+	// VolumeMounts are volumes to mount into the sandbox at creation time.
+	VolumeMounts []VolumeMount
+}
+
+// AutoResumeConfig configures automatic resuming of paused sandboxes on traffic.
+type AutoResumeConfig struct {
+	// Enabled enables automatic resuming when the paused sandbox receives
+	// inbound network traffic.
+	Enabled bool `json:"enabled"`
+}
+
+// MCPConfig holds MCP (Model Context Protocol) gateway configuration.
+type MCPConfig struct {
+	// Integrations is a map of MCP server integrations (e.g. "github", "slack")
+	// to their configuration parameters.
+	Integrations map[string]map[string]interface{} `json:"-"`
 }
 
 // Sandbox represents a running E2B sandbox microVM.
@@ -64,6 +104,12 @@ type createRequest struct {
 	Secure              bool              `json:"secure,omitempty"`
 	AllowInternetAccess *bool             `json:"allow_internet_access,omitempty"`
 	Network             *NetworkConfig    `json:"network,omitempty"`
+	AutoPause           bool              `json:"autoPause,omitempty"`
+	AutoPauseMemory     *bool             `json:"autoPauseMemory,omitempty"`
+	AutoResume          *AutoResumeConfig `json:"autoResume,omitempty"`
+	Metadata            map[string]string `json:"metadata,omitempty"`
+	MCP                 *MCPConfig        `json:"mcp,omitempty"`
+	VolumeMounts        []VolumeMount     `json:"volumeMounts,omitempty"`
 }
 
 type createResponse struct {
@@ -75,7 +121,7 @@ type createResponse struct {
 // SandboxLifecycle holds lifecycle configuration for a sandbox.
 type SandboxLifecycle struct {
 	AutoResume bool   `json:"autoResume"`
-	OnTimeout  string `json:"onTimeout"` // "keep" or "kill"
+	OnTimeout  string `json:"onTimeout"` // "pause" or "kill"
 }
 
 // VolumeMount represents a mounted volume in the sandbox.
@@ -86,25 +132,55 @@ type VolumeMount struct {
 
 // SandboxInfo holds details about a sandbox.
 type SandboxInfo struct {
-	ID           string           `json:"sandboxID"`
-	Alias        string           `json:"alias,omitempty"`
-	ClientID     string           `json:"clientID,omitempty"`
-	Template     string           `json:"templateID"`
-	State        string           `json:"state"`
-	CPUCount     int              `json:"cpuCount"`
-	MemoryMB     int              `json:"memoryMB"`
-	DiskSizeMB   int              `json:"diskSizeMB"`
-	StartedAt    string           `json:"startedAt"`
-	EndAt        string           `json:"endAt,omitempty"`
-	EnvdVersion  string           `json:"envdVersion,omitempty"`
-	Lifecycle    SandboxLifecycle `json:"lifecycle,omitempty"`
-	VolumeMounts []VolumeMount    `json:"volumeMounts,omitempty"`
-	Network      *NetworkConfig   `json:"network,omitempty"`
+	ID           string            `json:"sandboxID"`
+	Alias        string            `json:"alias,omitempty"`
+	ClientID     string            `json:"clientID,omitempty"`
+	Template     string            `json:"templateID"`
+	State        string            `json:"state"`
+	CPUCount     int               `json:"cpuCount"`
+	MemoryMB     int               `json:"memoryMB"`
+	DiskSizeMB   int               `json:"diskSizeMB"`
+	StartedAt    string            `json:"startedAt"`
+	EndAt        string            `json:"endAt,omitempty"`
+	EnvdVersion  string            `json:"envdVersion,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Lifecycle    SandboxLifecycle  `json:"lifecycle,omitempty"`
+	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
+	Network      *NetworkConfig    `json:"network,omitempty"`
 }
 
 // envdBaseURL returns the base URL of the sandbox environment daemon.
 func (s *Sandbox) envdBaseURL() string {
 	return fmt.Sprintf("https://%d-%s.%s", envdPort, s.ID, s.client.sandboxDomain)
+}
+
+// IsRunning checks whether the sandbox's envd daemon is healthy and
+// responding. It calls the /health endpoint on the sandbox data plane.
+// Returns true when the sandbox is running and ready to accept requests.
+func (s *Sandbox) IsRunning() (bool, error) {
+	return s.IsRunningWithContext(context.Background())
+}
+
+// IsRunningWithContext checks the sandbox health using the provided context.
+// Returns true if envd responds with 200 or 204.
+func (s *Sandbox) IsRunningWithContext(ctx context.Context) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.envdBaseURL()+"/health", nil)
+	if err != nil {
+		return false, fmt.Errorf("e2b: build health request: %w", err)
+	}
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("e2b: send health request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // Close destroys the sandbox, freeing all associated resources.
@@ -214,16 +290,39 @@ func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int)
 
 // Pause pauses the sandbox, stopping billing while preserving state.
 // A paused sandbox can be resumed with Resume.
-func (s *Sandbox) Pause() error {
-	return s.PauseWithContext(context.Background())
+// By default, a full memory snapshot is taken. Pass keepMemory=false to
+// drop the in-memory state and persist only the filesystem; resuming
+// such a snapshot cold-boots (reboots) the sandbox from disk.
+func (s *Sandbox) Pause(keepMemory ...bool) error {
+	km := true
+	if len(keepMemory) > 0 {
+		km = keepMemory[0]
+	}
+	return s.PauseWithContext(context.Background(), km)
 }
 
 // PauseWithContext pauses the sandbox using the provided context.
-func (s *Sandbox) PauseWithContext(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/pause", nil)
+// keepMemory controls the snapshot type: true (default) takes a full memory
+// snapshot; false drops memory and saves only the filesystem.
+func (s *Sandbox) PauseWithContext(ctx context.Context, keepMemory ...bool) error {
+	km := true
+	if len(keepMemory) > 0 {
+		km = keepMemory[0]
+	}
+
+	type pauseRequest struct {
+		KeepMemory bool `json:"keepMemory"`
+	}
+	body, err := json.Marshal(pauseRequest{KeepMemory: km})
+	if err != nil {
+		return fmt.Errorf("e2b: marshal pause request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/pause", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("e2b: build pause request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", s.client.apiKey)
 
 	resp, err := s.client.httpClient.Do(req)

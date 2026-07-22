@@ -398,6 +398,159 @@ func TestEnvdBaseURL(t *testing.T) {
 	}
 }
 
+func TestIsRunningHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %s, want /health", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:        "test-key",
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunning = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningHealthyStatus200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunning = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningNotHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if healthy {
+		t.Errorf("IsRunning = %v, want false for 502", healthy)
+	}
+}
+
+func TestIsRunningWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunningWithContext(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunningWithContext: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunningWithContext = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.IsRunningWithContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
 func TestInfoSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1196,6 +1349,428 @@ func TestClientListSandboxesCanceledContext(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// ListSandboxesV2 unit tests
+// ============================================================================
+
+func TestClientListSandboxesV2Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/v2/sandboxes" {
+			t.Errorf("path = %s, want /v2/sandboxes", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxInfo{
+			{
+				ID:         "sbx-running",
+				Template:   "base",
+				State:      "running",
+				CPUCount:   2,
+				MemoryMB:   512,
+				DiskSizeMB: 23318,
+				StartedAt:  "2024-01-01T00:00:00Z",
+			},
+			{
+				ID:         "sbx-paused",
+				Template:   "python3",
+				State:      "paused",
+				CPUCount:   4,
+				MemoryMB:   1024,
+				DiskSizeMB: 23318,
+				StartedAt:  "2024-01-01T00:05:00Z",
+				Metadata:   map[string]string{"env": "dev"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSandboxesV2(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+
+	if len(result.Sandboxes) != 2 {
+		t.Fatalf("len = %d, want 2", len(result.Sandboxes))
+	}
+	if result.Sandboxes[0].ID != "sbx-running" {
+		t.Errorf("items[0].ID = %q, want %q", result.Sandboxes[0].ID, "sbx-running")
+	}
+	if result.Sandboxes[0].State != "running" {
+		t.Errorf("items[0].State = %q, want %q", result.Sandboxes[0].State, "running")
+	}
+	if result.Sandboxes[1].ID != "sbx-paused" {
+		t.Errorf("items[1].ID = %q, want %q", result.Sandboxes[1].ID, "sbx-paused")
+	}
+	if result.Sandboxes[1].State != "paused" {
+		t.Errorf("items[1].State = %q, want %q", result.Sandboxes[1].State, "paused")
+	}
+}
+
+func TestClientListSandboxesV2FilterByState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		state := r.URL.Query()["state"]
+		t.Logf("received state query: %v", state)
+
+		// Only return paused sandboxes when filtering.
+		if len(state) == 1 && state[0] == "paused" {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]SandboxInfo{
+				{
+					ID:    "sbx-paused",
+					State: "paused",
+				},
+			})
+			return
+		}
+		// Return all sandboxes.
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxInfo{
+			{ID: "sbx-running", State: "running"},
+			{ID: "sbx-paused", State: "paused"},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Filter by paused only.
+	result, err := client.ListSandboxesV2(context.Background(), WithSandboxState("paused"))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+	if len(result.Sandboxes) != 1 {
+		t.Fatalf("len = %d, want 1", len(result.Sandboxes))
+	}
+	if result.Sandboxes[0].State != "paused" {
+		t.Errorf("state = %q, want %q", result.Sandboxes[0].State, "paused")
+	}
+}
+
+func TestClientListSandboxesV2FilterByMultipleStates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		states := r.URL.Query()["state"]
+		if len(states) != 2 {
+			t.Errorf("expected 2 state params, got %d: %v", len(states), states)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxInfo{
+			{ID: "sbx-1", State: "running"},
+			{ID: "sbx-2", State: "paused"},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSandboxesV2(context.Background(), WithSandboxState("running", "paused"))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+	if len(result.Sandboxes) != 2 {
+		t.Fatalf("len = %d, want 2", len(result.Sandboxes))
+	}
+}
+
+func TestClientListSandboxesV2WithMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify metadata query params are present.
+		metaValues := r.URL.Query()["metadata"]
+		if len(metaValues) != 2 {
+			t.Errorf("expected 2 metadata params, got %d: %v", len(metaValues), metaValues)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]SandboxInfo{
+			{
+				ID:       "sbx-dev",
+				State:    "running",
+				Metadata: map[string]string{"env": "dev", "app": "myapp"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSandboxesV2(context.Background(),
+		WithSandboxMetadata(map[string]string{"env": "dev", "app": "myapp"}))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+	if len(result.Sandboxes) != 1 {
+		t.Fatalf("len = %d, want 1", len(result.Sandboxes))
+	}
+	if result.Sandboxes[0].ID != "sbx-dev" {
+		t.Errorf("ID = %q, want %q", result.Sandboxes[0].ID, "sbx-dev")
+	}
+}
+
+func TestClientListSandboxesV2Pagination(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextToken := r.URL.Query().Get("nextToken")
+		limit := r.URL.Query().Get("limit")
+
+		if nextToken == "" {
+			// First page.
+			if limit != "1" {
+				t.Errorf("first page limit = %q, want %q", limit, "1")
+			}
+			w.Header().Set("X-Next-Token", "page2-token")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]SandboxInfo{
+				{ID: "sbx-1", State: "running"},
+			})
+		} else {
+			if nextToken != "page2-token" {
+				t.Errorf("nextToken = %q, want %q", nextToken, "page2-token")
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]SandboxInfo{
+				{ID: "sbx-2", State: "paused"},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// First page.
+	result, err := client.ListSandboxesV2(context.Background(), WithSandboxLimit(1))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2 page1: %v", err)
+	}
+	if result.NextToken != "page2-token" {
+		t.Errorf("NextToken = %q, want %q", result.NextToken, "page2-token")
+	}
+	if len(result.Sandboxes) != 1 || result.Sandboxes[0].ID != "sbx-1" {
+		t.Fatalf("page1 unexpected: %+v", result.Sandboxes)
+	}
+
+	// Second page.
+	result2, err := client.ListSandboxesV2(context.Background(), WithSandboxNextToken(result.NextToken))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2 page2: %v", err)
+	}
+	if result2.NextToken != "" {
+		t.Errorf("NextToken = %q, want empty", result2.NextToken)
+	}
+	if len(result2.Sandboxes) != 1 || result2.Sandboxes[0].ID != "sbx-2" {
+		t.Fatalf("page2 unexpected: %+v", result2.Sandboxes)
+	}
+}
+
+func TestClientListSandboxesV2URLEncoding(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify metadata values decode correctly despite special characters.
+		metaValues := r.URL.Query()["metadata"]
+		expected := map[string]bool{
+			"env=prod":        true,
+			"session=abc&def": true,
+			"key=1+2=3":       true,
+		}
+		found := 0
+		for _, mv := range metaValues {
+			t.Logf("decoded metadata: %q", mv)
+			if expected[mv] {
+				found++
+			}
+		}
+		if found != 3 {
+			t.Errorf("expected 3 metadata values, got %d: %v", found, metaValues)
+		}
+
+		// Verify nextToken decodes correctly.
+		if got := r.URL.Query().Get("nextToken"); got != "tok+/%x" {
+			t.Errorf("nextToken = %q, want %q", got, "tok+/%x")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+
+	_, err := client.ListSandboxesV2(context.Background(),
+		WithSandboxMetadata(map[string]string{
+			"env":     "prod",
+			"session": "abc&def",
+			"key":     "1+2=3",
+		}),
+		WithSandboxNextToken("tok+/%x"),
+	)
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.ListSandboxesV2(context.Background())
+	if err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+	if len(result.Sandboxes) != 0 {
+		t.Errorf("len = %d, want 0", len(result.Sandboxes))
+	}
+	if result.NextToken != "" {
+		t.Errorf("NextToken = %q, want empty", result.NextToken)
+	}
+}
+
+func TestClientListSandboxesV2ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxesV2(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestClientListSandboxesV2Unauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"invalid api key"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "bad-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxesV2(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestClientListSandboxesV2InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListSandboxesV2(context.Background())
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestClientListSandboxesV2CanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.ListSandboxesV2(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
 func TestLogsSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1444,6 +2019,18 @@ func TestPauseSuccess(t *testing.T) {
 		if got := r.Header.Get("X-API-Key"); got != "test-key" {
 			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
 		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", got, "application/json")
+		}
+		var body struct {
+			KeepMemory bool `json:"keepMemory"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !body.KeepMemory {
+			t.Errorf("keepMemory = %v, want true (default)", body.KeepMemory)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
@@ -1460,6 +2047,66 @@ func TestPauseSuccess(t *testing.T) {
 	if err := sbx.Pause(); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
+}
+
+func TestPauseWithKeepMemory(t *testing.T) {
+	t.Run("keepMemory=false", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				KeepMemory bool `json:"keepMemory"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body.KeepMemory {
+				t.Errorf("keepMemory = %v, want false", body.KeepMemory)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		sbx := &Sandbox{
+			ID: "sbx-123",
+			client: &Client{
+				apiKey:     "test-key",
+				apiBaseURL: srv.URL,
+				httpClient: http.DefaultClient,
+			},
+		}
+
+		if err := sbx.Pause(false); err != nil {
+			t.Fatalf("Pause(false): %v", err)
+		}
+	})
+
+	t.Run("keepMemory=true explicit", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				KeepMemory bool `json:"keepMemory"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if !body.KeepMemory {
+				t.Errorf("keepMemory = %v, want true", body.KeepMemory)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		sbx := &Sandbox{
+			ID: "sbx-123",
+			client: &Client{
+				apiKey:     "test-key",
+				apiBaseURL: srv.URL,
+				httpClient: http.DefaultClient,
+			},
+		}
+
+		if err := sbx.Pause(true); err != nil {
+			t.Fatalf("Pause(true): %v", err)
+		}
+	})
 }
 
 func TestPauseWithContext(t *testing.T) {
@@ -2145,5 +2792,412 @@ func TestListSnapshotsCanceledContext(t *testing.T) {
 	_, err = client.ListSnapshots(ctx)
 	if err == nil {
 		t.Fatal("expected error for canceled context")
+	}
+}
+
+// --- Connect tests ---
+
+func TestConnectSuccessAlreadyRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123/connect" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/connect", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want %q", got, "application/json")
+		}
+
+		var body struct {
+			Timeout int `json:"timeout"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Timeout != 120 {
+			t.Errorf("timeout = %d, want %d", body.Timeout, 120)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.Connect(context.Background(), "sbx-123", 120)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if sbx.ID != "sbx-123" {
+		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-123")
+	}
+	if sbx.accessToken != "token-abc" {
+		t.Errorf("accessToken = %q, want %q", sbx.accessToken, "token-abc")
+	}
+	if sbx.Commands == nil {
+		t.Error("Commands service not initialized")
+	}
+	if sbx.Filesystem == nil {
+		t.Error("Filesystem service not initialized")
+	}
+}
+
+func TestConnectSuccessResumedFromPaused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:          "sbx-paused",
+			EnvdAccessToken:    "token-resumed",
+			TrafficAccessToken: "traffic-token",
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.Connect(context.Background(), "sbx-paused", 300)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if sbx.ID != "sbx-paused" {
+		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-paused")
+	}
+	if sbx.TrafficAccessToken != "traffic-token" {
+		t.Errorf("TrafficAccessToken = %q, want %q", sbx.TrafficAccessToken, "traffic-token")
+	}
+}
+
+func TestConnectNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"message":"sandbox not found"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.Connect(context.Background(), "sbx-gone", 120)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *SandboxNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	if e.SandboxID != "sbx-gone" {
+		t.Errorf("SandboxID = %q, want %q", e.SandboxID, "sbx-gone")
+	}
+}
+
+func TestConnectServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.Connect(context.Background(), "sbx-123", 120)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestConnectCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = client.Connect(ctx, "sbx-123", 120)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
+// --- NewSandbox lifecycle tests ---
+
+func TestNewSandboxWithAutoPause(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !cr.AutoPause {
+			t.Errorf("autoPause = %v, want true", cr.AutoPause)
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-key",
+		APIBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		AutoPause: true,
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+
+	if sbx.ID != "sbx-123" {
+		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-123")
+	}
+}
+
+func TestNewSandboxWithAutoPauseMemory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !cr.AutoPause {
+			t.Errorf("autoPause = %v, want true", cr.AutoPause)
+		}
+		if cr.AutoPauseMemory == nil || *cr.AutoPauseMemory {
+			t.Errorf("autoPauseMemory should be false")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	autoPauseMem := false
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		AutoPause:       true,
+		AutoPauseMemory: &autoPauseMem,
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+}
+
+func TestNewSandboxWithAutoResume(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if cr.AutoResume == nil || !cr.AutoResume.Enabled {
+			t.Errorf("autoResume.enabled should be true")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		AutoResume: &AutoResumeConfig{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+}
+
+func TestNewSandboxWithMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if cr.Metadata["env"] != "prod" {
+			t.Errorf("metadata[env] = %q, want %q", cr.Metadata["env"], "prod")
+		}
+		if cr.Metadata["user"] != "alice" {
+			t.Errorf("metadata[user] = %q, want %q", cr.Metadata["user"], "alice")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		Metadata: map[string]string{"env": "prod", "user": "alice"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+}
+
+func TestNewSandboxWithVolumeMounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(cr.VolumeMounts) != 1 {
+			t.Fatalf("len(volumeMounts) = %d, want 1", len(cr.VolumeMounts))
+		}
+		if cr.VolumeMounts[0].Name != "data-vol" {
+			t.Errorf("volumeMounts[0].Name = %q, want %q", cr.VolumeMounts[0].Name, "data-vol")
+		}
+		if cr.VolumeMounts[0].Path != "/mnt/data" {
+			t.Errorf("volumeMounts[0].Path = %q, want %q", cr.VolumeMounts[0].Path, "/mnt/data")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-123",
+			EnvdAccessToken: "token-abc",
+		})
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		VolumeMounts: []VolumeMount{{Name: "data-vol", Path: "/mnt/data"}},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+}
+
+func TestNewSandboxFullLifecycleConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var cr createRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !cr.AutoPause {
+			t.Errorf("autoPause should be true")
+		}
+		if cr.AutoPauseMemory == nil || *cr.AutoPauseMemory {
+			t.Errorf("autoPauseMemory should be false")
+		}
+		if cr.AutoResume == nil || !cr.AutoResume.Enabled {
+			t.Errorf("autoResume.enabled should be true")
+		}
+		if cr.Metadata["app"] != "my-app" {
+			t.Errorf("metadata[app] = %q, want %q", cr.Metadata["app"], "my-app")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createResponse{
+			SandboxID:       "sbx-full",
+			EnvdAccessToken: "token-full",
+		})
+	}))
+	defer srv.Close()
+
+	client, _ := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	autoPauseMem := false
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		AutoPause:       true,
+		AutoPauseMemory: &autoPauseMem,
+		AutoResume:      &AutoResumeConfig{Enabled: true},
+		Metadata:        map[string]string{"app": "my-app"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+	if sbx.ID != "sbx-full" {
+		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-full")
 	}
 }
