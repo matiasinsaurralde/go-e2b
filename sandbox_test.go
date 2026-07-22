@@ -398,6 +398,159 @@ func TestEnvdBaseURL(t *testing.T) {
 	}
 }
 
+func TestIsRunningHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %s, want /health", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:        "test-key",
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunning = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningHealthyStatus200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunning = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningNotHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning: %v", err)
+	}
+	if healthy {
+		t.Errorf("IsRunning = %v, want false for 502", healthy)
+	}
+}
+
+func TestIsRunningWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	healthy, err := sbx.IsRunningWithContext(context.Background())
+	if err != nil {
+		t.Fatalf("IsRunningWithContext: %v", err)
+	}
+	if !healthy {
+		t.Errorf("IsRunningWithContext = %v, want true", healthy)
+	}
+}
+
+func TestIsRunningCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			sandboxDomain: "test.e2b.app",
+			httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					req.URL.Scheme = srv.URL[0:4]
+					req.URL.Host = srv.Listener.Addr().String()
+					return http.DefaultTransport.RoundTrip(req)
+				}),
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sbx.IsRunningWithContext(ctx)
+	if err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
 func TestInfoSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

@@ -153,6 +153,35 @@ func (s *Sandbox) envdBaseURL() string {
 	return fmt.Sprintf("https://%d-%s.%s", envdPort, s.ID, s.client.sandboxDomain)
 }
 
+// IsRunning checks whether the sandbox's envd daemon is healthy and
+// responding. It calls the /health endpoint on the sandbox data plane.
+// Returns true when the sandbox is running and ready to accept requests.
+func (s *Sandbox) IsRunning() (bool, error) {
+	return s.IsRunningWithContext(context.Background())
+}
+
+// IsRunningWithContext checks the sandbox health using the provided context.
+// Returns true if envd responds with 200 or 204.
+func (s *Sandbox) IsRunningWithContext(ctx context.Context) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.envdBaseURL()+"/health", nil)
+	if err != nil {
+		return false, fmt.Errorf("e2b: build health request: %w", err)
+	}
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("e2b: send health request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 // Close destroys the sandbox, freeing all associated resources.
 func (s *Sandbox) Close() error {
 	return s.CloseWithContext(context.Background())
