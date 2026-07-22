@@ -30,7 +30,7 @@ func main() {
 
 	fmt.Printf("Sandbox created: %s\n", sandbox.ID)
 
-	result, err := sandbox.Commands.Run("python3", []string{"-c", "print(1+1)"})
+	result, err := sandbox.Commands.Run(context.Background(), "python3 -c 'print(1+1)'")
 	if err != nil {
 		log.Fatalf("Failed to run command: %v", err)
 	}

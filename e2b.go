@@ -21,7 +21,7 @@
 //	}
 //	defer sandbox.Close()
 //
-//	result, err := sandbox.Commands.Run("echo", []string{"hello"})
+//	result, err := sandbox.Commands.Run(context.Background(), "echo hello")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
