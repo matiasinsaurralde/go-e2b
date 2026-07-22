@@ -1213,6 +1213,10 @@ func TestClientListSandboxesEmpty(t *testing.T) {
 }
 
 func TestClientNewClientMissingAPIKey(t *testing.T) {
+	// Force an empty API key so the test is hermetic even when E2B_API_KEY
+	// is set in the ambient environment (e.g. during integration runs).
+	t.Setenv(apiKeyEnv, "")
+
 	_, err := NewClient(ClientConfig{})
 	if err == nil {
 		t.Fatal("expected error for missing API key")
@@ -2074,7 +2078,7 @@ func TestPauseWithKeepMemory(t *testing.T) {
 			},
 		}
 
-		if err := sbx.Pause(false); err != nil {
+		if err := sbx.Pause(WithKeepMemory(false)); err != nil {
 			t.Fatalf("Pause(false): %v", err)
 		}
 	})
@@ -2103,7 +2107,7 @@ func TestPauseWithKeepMemory(t *testing.T) {
 			},
 		}
 
-		if err := sbx.Pause(true); err != nil {
+		if err := sbx.Pause(WithKeepMemory(true)); err != nil {
 			t.Fatalf("Pause(true): %v", err)
 		}
 	})
