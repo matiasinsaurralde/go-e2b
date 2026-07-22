@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -890,6 +891,52 @@ func TestFilesystemStatServerError(t *testing.T) {
 	}
 }
 
+// TestFilesystemStatNilEntry verifies Stat does not panic when envd returns a
+// success response with a nil Entry (e.g. protocol skew or an empty proto).
+func TestFilesystemStatNilEntry(t *testing.T) {
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return connect.NewResponse(&filesystempb.StatResponse{}), nil
+		},
+	})
+
+	info, err := sbx.Filesystem.Stat(context.Background(), "/tmp/f.txt")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info == nil {
+		t.Fatal("expected non-nil FileInfo")
+	}
+	if info.Name != "" || info.Path != "" {
+		t.Errorf("expected zero FileInfo, got %+v", info)
+	}
+}
+
+// TestFilesystemStatOwnerGroup verifies Stat exposes the owner and group
+// fields returned by envd.
+func TestFilesystemStatOwnerGroup(t *testing.T) {
+	const path = "/root/.bashrc"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{Name: ".bashrc", Path: path, Owner: "root", Group: "root"},
+			}), nil
+		},
+	})
+
+	info, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Owner != "root" {
+		t.Errorf("Owner = %q, want root", info.Owner)
+	}
+	if info.Group != "root" {
+		t.Errorf("Group = %q, want root", info.Group)
+	}
+}
+
 func TestFilesystemStatInvalidJSON(t *testing.T) {
 	// gRPC errors are not JSON-decode issues; just test that error propagation works.
 	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
@@ -921,27 +968,27 @@ func TestFilesystemMakeDir(t *testing.T) {
 		},
 	})
 
-	created, err := sbx.Filesystem.MakeDir(context.Background(), dir)
-	if err != nil {
+	if err := sbx.Filesystem.MakeDir(context.Background(), dir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
-	}
-	if !created {
-		t.Error("expected created=true for new directory")
 	}
 }
 
-func TestFilesystemMakeDirCreated(t *testing.T) {
-	const dir = "/home/user/newdir"
+// TestFilesystemMakeDirExisting verifies MakeDir is idempotent: envd returns
+// HTTP 200 with the entry (no AlreadyExists code) when the directory already
+// exists, so MakeDir must treat that as success.
+func TestFilesystemMakeDirExisting(t *testing.T) {
+	const dir = "/home/user/existing"
 
 	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
 		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
-			return connect.NewResponse(&filesystempb.MakeDirResponse{}), nil
+			return connect.NewResponse(&filesystempb.MakeDirResponse{
+				Entry: &filesystempb.EntryInfo{Name: "existing", Path: dir, Type: filesystempb.FileType_FILE_TYPE_DIRECTORY},
+			}), nil
 		},
 	})
 
-	_, err := sbx.Filesystem.MakeDir(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("MakeDir: %v", err)
+	if err := sbx.Filesystem.MakeDir(context.Background(), dir); err != nil {
+		t.Fatalf("MakeDir on existing dir: %v", err)
 	}
 }
 
@@ -957,7 +1004,7 @@ func TestFilesystemMakeDirWithUser(t *testing.T) {
 		},
 	})
 
-	_, err := sbx.Filesystem.MakeDir(context.Background(), dir, WithFileUser("root"))
+	err := sbx.Filesystem.MakeDir(context.Background(), dir, WithFileUser("root"))
 	if err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
@@ -972,7 +1019,7 @@ func TestFilesystemMakeDirNotFound(t *testing.T) {
 		},
 	})
 
-	_, err := sbx.Filesystem.MakeDir(context.Background(), dir)
+	err := sbx.Filesystem.MakeDir(context.Background(), dir)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -992,7 +1039,7 @@ func TestFilesystemMakeDirServerError(t *testing.T) {
 		},
 	})
 
-	_, err := sbx.Filesystem.MakeDir(context.Background(), "/root/protected")
+	err := sbx.Filesystem.MakeDir(context.Background(), "/root/protected")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1009,7 +1056,7 @@ func TestFilesystemMakeDirTimeout(t *testing.T) {
 		},
 	})
 
-	_, err := sbx.Filesystem.MakeDir(context.Background(), "/tmp/mydir", WithWriteTimeout(1*time.Millisecond))
+	err := sbx.Filesystem.MakeDir(context.Background(), "/tmp/mydir", WithWriteTimeout(1*time.Millisecond))
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -1291,4 +1338,77 @@ func TestFilesystemWatchDirCreateError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+}
+
+// TestFilesystemWatchDirUserThreaded verifies the user context passed to
+// WatchDir is reused on the follow-up GetWatcherEvents and RemoveWatcher calls,
+// not dropped to the default user.
+func TestFilesystemWatchDirUserThreaded(t *testing.T) {
+	const dir = "/root/watched"
+
+	checkUser := func(hdr string) {
+		if hdr != "root" {
+			t.Errorf("X-User-ID = %q, want root", hdr)
+		}
+	}
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		createWatcherFn: func(_ context.Context, req *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error) {
+			checkUser(req.Header().Get("X-User-ID"))
+			return connect.NewResponse(&filesystempb.CreateWatcherResponse{WatcherId: "w1"}), nil
+		},
+		getWatcherEventsFn: func(_ context.Context, req *connect.Request[filesystempb.GetWatcherEventsRequest]) (*connect.Response[filesystempb.GetWatcherEventsResponse], error) {
+			checkUser(req.Header().Get("X-User-ID"))
+			return connect.NewResponse(&filesystempb.GetWatcherEventsResponse{}), nil
+		},
+		removeWatcherFn: func(_ context.Context, req *connect.Request[filesystempb.RemoveWatcherRequest]) (*connect.Response[filesystempb.RemoveWatcherResponse], error) {
+			checkUser(req.Header().Get("X-User-ID"))
+			return connect.NewResponse(&filesystempb.RemoveWatcherResponse{}), nil
+		},
+	})
+
+	handle, err := sbx.Filesystem.WatchDir(context.Background(), dir, false, WithFileUser("root"))
+	if err != nil {
+		t.Fatalf("WatchDir: %v", err)
+	}
+	if _, err := handle.GetEvents(context.Background()); err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+// TestFilesystemWatchHandleConcurrentStop exercises GetEvents and Stop from
+// separate goroutines; run under -race it guards against a data race on the
+// watcher's stopped flag.
+func TestFilesystemWatchHandleConcurrentStop(t *testing.T) {
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		createWatcherFn: func(_ context.Context, _ *connect.Request[filesystempb.CreateWatcherRequest]) (*connect.Response[filesystempb.CreateWatcherResponse], error) {
+			return connect.NewResponse(&filesystempb.CreateWatcherResponse{WatcherId: "w1"}), nil
+		},
+		getWatcherEventsFn: func(_ context.Context, _ *connect.Request[filesystempb.GetWatcherEventsRequest]) (*connect.Response[filesystempb.GetWatcherEventsResponse], error) {
+			return connect.NewResponse(&filesystempb.GetWatcherEventsResponse{}), nil
+		},
+	})
+
+	handle, err := sbx.Filesystem.WatchDir(context.Background(), "/tmp/watched", false)
+	if err != nil {
+		t.Fatalf("WatchDir: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			// Ignore errors: once stopped, GetEvents returns an error by design.
+			_, _ = handle.GetEvents(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_ = handle.Stop(context.Background())
+	}()
+	wg.Wait()
 }

@@ -150,7 +150,7 @@ func TestIntegrationFilesystemListEmptyDir(t *testing.T) {
 
 	// Create an empty directory.
 	dirPath := "/tmp/integration_empty_dir"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestIntegrationFilesystemListWithFiles(t *testing.T) {
 	ctx := context.Background()
 
 	dirPath := "/tmp/integration_list_test"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestIntegrationFilesystemStatDirectory(t *testing.T) {
 	ctx := context.Background()
 
 	const dirPath = "/tmp/integration_stat_dir"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestIntegrationFilesystemMakeDirSimple(t *testing.T) {
 	ctx := context.Background()
 
 	dirPath := "/tmp/integration_mkdir_simple"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -330,7 +330,7 @@ func TestIntegrationFilesystemMakeDirNested(t *testing.T) {
 
 	// Create nested directories in one call (mkdir -p semantics).
 	nestedPath := "/tmp/integration_mkdir_nested/a/b/c"
-	if _, err := sbx.Filesystem.MakeDir(ctx, nestedPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, nestedPath); err != nil {
 		t.Fatalf("MakeDir nested: %v", err)
 	}
 
@@ -389,7 +389,7 @@ func TestIntegrationFilesystemRemoveDirectory(t *testing.T) {
 	ctx := context.Background()
 
 	dirPath := "/tmp/integration_remove_dir"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -444,7 +444,7 @@ func TestIntegrationFilesystemFullWorkflow(t *testing.T) {
 
 	// Step 1: MakeDir
 	t.Log("Step 1: MakeDir")
-	if _, err := sbx.Filesystem.MakeDir(ctx, workDir); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, workDir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -575,7 +575,12 @@ func TestIntegrationFilesystemStatWithUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(%s, user=root): %v", rootFile, err)
 	}
-	t.Logf("stat as root: name=%s type=%s size=%d", info.Name, info.Type, info.Size)
+	t.Logf("stat as root: name=%s type=%s size=%d owner=%s group=%s", info.Name, info.Type, info.Size, info.Owner, info.Group)
+	// Assert the effective user, not merely that the call succeeded: a file
+	// written with WithFileUser("root") must be owned by root.
+	if info.Owner != "root" {
+		t.Errorf("Owner = %q, want root", info.Owner)
+	}
 }
 
 // --- Integration: MakeDir with user context ---
@@ -585,7 +590,7 @@ func TestIntegrationFilesystemMakeDirWithUser(t *testing.T) {
 	ctx := context.Background()
 
 	dirPath := "/root/integration_mkdir_user"
-	if _, err := sbx.Filesystem.MakeDir(ctx, dirPath, WithFileUser("root")); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath, WithFileUser("root")); err != nil {
 		t.Fatalf("MakeDir(%s, user=root): %v", dirPath, err)
 	}
 
@@ -594,7 +599,10 @@ func TestIntegrationFilesystemMakeDirWithUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	t.Logf("created as root: name=%s type=%s", info.Name, info.Type)
+	t.Logf("created as root: name=%s type=%s owner=%s group=%s", info.Name, info.Type, info.Owner, info.Group)
+	if info.Owner != "root" {
+		t.Errorf("Owner = %q, want root", info.Owner)
+	}
 }
 
 // --- Integration: Concurrent operations test ---
@@ -604,7 +612,7 @@ func TestIntegrationFilesystemConcurrent(t *testing.T) {
 	ctx := context.Background()
 
 	baseDir := "/tmp/integration_concurrent"
-	if _, err := sbx.Filesystem.MakeDir(ctx, baseDir); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, baseDir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -752,7 +760,7 @@ func TestIntegrationFilesystemRenameDirectory(t *testing.T) {
 	oldDir := "/tmp/integration_rename_old_dir"
 	newDir := "/tmp/integration_rename_new_dir"
 
-	if _, err := sbx.Filesystem.MakeDir(ctx, oldDir); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, oldDir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 	// Write a file inside.
@@ -784,7 +792,7 @@ func TestIntegrationFilesystemWatchDir(t *testing.T) {
 	ctx := context.Background()
 
 	watchDir := "/tmp/integration_watch_dir"
-	if _, err := sbx.Filesystem.MakeDir(ctx, watchDir); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, watchDir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
@@ -828,10 +836,10 @@ func TestIntegrationFilesystemWatchDirRecursive(t *testing.T) {
 	ctx := context.Background()
 
 	watchDir := "/tmp/integration_watch_recursive"
-	if _, err := sbx.Filesystem.MakeDir(ctx, watchDir); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, watchDir); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
-	if _, err := sbx.Filesystem.MakeDir(ctx, watchDir+"/sub"); err != nil {
+	if err := sbx.Filesystem.MakeDir(ctx, watchDir+"/sub"); err != nil {
 		t.Fatalf("MakeDir sub: %v", err)
 	}
 
