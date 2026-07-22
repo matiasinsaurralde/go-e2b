@@ -288,32 +288,43 @@ func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int)
 	}
 }
 
+// pauseParams holds options for a Pause request.
+type pauseParams struct {
+	keepMemory bool
+}
+
+// PauseOption configures a Pause / PauseWithContext request.
+type PauseOption func(*pauseParams)
+
+// WithKeepMemory controls the snapshot type taken when pausing. When true
+// (the default) a full memory snapshot is taken so the sandbox can be
+// auto-resumed; when false the in-memory state is dropped and only the
+// filesystem is persisted, so resuming cold-boots (reboots) from disk.
+func WithKeepMemory(keep bool) PauseOption {
+	return func(p *pauseParams) { p.keepMemory = keep }
+}
+
 // Pause pauses the sandbox, stopping billing while preserving state.
 // A paused sandbox can be resumed with Resume.
-// By default, a full memory snapshot is taken. Pass keepMemory=false to
+// By default, a full memory snapshot is taken. Pass WithKeepMemory(false) to
 // drop the in-memory state and persist only the filesystem; resuming
 // such a snapshot cold-boots (reboots) the sandbox from disk.
-func (s *Sandbox) Pause(keepMemory ...bool) error {
-	km := true
-	if len(keepMemory) > 0 {
-		km = keepMemory[0]
-	}
-	return s.PauseWithContext(context.Background(), km)
+func (s *Sandbox) Pause(opts ...PauseOption) error {
+	return s.PauseWithContext(context.Background(), opts...)
 }
 
 // PauseWithContext pauses the sandbox using the provided context.
-// keepMemory controls the snapshot type: true (default) takes a full memory
-// snapshot; false drops memory and saves only the filesystem.
-func (s *Sandbox) PauseWithContext(ctx context.Context, keepMemory ...bool) error {
-	km := true
-	if len(keepMemory) > 0 {
-		km = keepMemory[0]
+// See Pause and WithKeepMemory for the available options.
+func (s *Sandbox) PauseWithContext(ctx context.Context, opts ...PauseOption) error {
+	p := pauseParams{keepMemory: true}
+	for _, o := range opts {
+		o(&p)
 	}
 
 	type pauseRequest struct {
 		KeepMemory bool `json:"keepMemory"`
 	}
-	body, err := json.Marshal(pauseRequest{KeepMemory: km})
+	body, err := json.Marshal(pauseRequest{KeepMemory: p.keepMemory})
 	if err != nil {
 		return fmt.Errorf("e2b: marshal pause request: %w", err)
 	}

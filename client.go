@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // ClientConfig configures a new Client.
@@ -207,7 +209,7 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ...ListSnapshotsOption)
 		q.Set("sandboxID", p.sandboxID)
 	}
 	if p.limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", p.limit))
+		q.Set("limit", strconv.Itoa(p.limit))
 	}
 	if p.nextToken != "" {
 		q.Set("nextToken", p.nextToken)
@@ -277,7 +279,13 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds i
 		// OK = sandbox was already running, Created = resumed from paused
 	default:
 		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == http.StatusNotFound {
+		// A missing sandbox surfaces as 404; a malformed sandbox ID surfaces
+		// as 400 with an "invalid sandbox ID" message. Map both to the typed
+		// SandboxNotFoundError so callers can handle "no such sandbox"
+		// uniformly, while leaving other 400s (e.g. bad timeout) as generic.
+		if resp.StatusCode == http.StatusNotFound ||
+			(resp.StatusCode == http.StatusBadRequest &&
+				strings.Contains(strings.ToLower(string(respBody)), "invalid sandbox id")) {
 			return nil, &SandboxNotFoundError{SandboxID: sandboxID}
 		}
 		return nil, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
@@ -381,7 +389,7 @@ func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Opt
 	}
 
 	if p.limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", p.limit))
+		q.Set("limit", strconv.Itoa(p.limit))
 	}
 	if p.nextToken != "" {
 		q.Set("nextToken", p.nextToken)

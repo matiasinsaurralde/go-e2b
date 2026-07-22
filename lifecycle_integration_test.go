@@ -225,7 +225,7 @@ func TestIntegrationManualPauseFilesystemOnly(t *testing.T) {
 
 	// Pause with keepMemory=false (filesystem-only snapshot).
 	t.Logf("  pausing with keepMemory=false...")
-	if err := sbx.Pause(false); err != nil {
+	if err := sbx.Pause(WithKeepMemory(false)); err != nil {
 		sbx.Close()
 		t.Fatalf("Pause(false): %v", err)
 	}
@@ -303,7 +303,7 @@ func TestIntegrationManualPauseFullMemory(t *testing.T) {
 
 	// Pause with keepMemory=true (default, full memory snapshot).
 	t.Logf("  pausing with keepMemory=true (default)...")
-	if err := sbx.Pause(true); err != nil {
+	if err := sbx.Pause(WithKeepMemory(true)); err != nil {
 		sbx.Close()
 		t.Fatalf("Pause(true): %v", err)
 	}
@@ -421,7 +421,7 @@ func TestIntegrationLifecycleFullWorkflow(t *testing.T) {
 
 	// ========== Step 4: Pause ==========
 	t.Log("=== Step 4: Pause sandbox ===")
-	if err := sbx.Pause(false); err != nil {
+	if err := sbx.Pause(WithKeepMemory(false)); err != nil {
 		sbx.Close()
 		t.Fatalf("Pause: %v", err)
 	}
@@ -599,25 +599,25 @@ func TestIntegrationLifecycleConcurrent(t *testing.T) {
 // ============================================================================
 // Test 10: autoResume → auto-pause → Connect → command.Run to read file
 //
-// 场景：
-//  1. 创建沙盒，设置 autoPause + autoResume（短超时）
-//  2. 用 command.Run 写一个文件
-//  3. 轮询等待沙盒自动进入 paused 状态
-//  4. 通过 client.Connect() 恢复沙盒句柄（控制面显式恢复）
-//  5. 在恢复的句柄上执行 command.Run 读取文件内容并验证
+// Scenario:
+//  1. Create a sandbox with autoPause + autoResume (short timeout).
+//  2. Write a file via command.Run.
+//  3. Poll until the sandbox automatically enters the paused state.
+//  4. Recover the sandbox handle via client.Connect() (explicit control-plane resume).
+//  5. Run command.Run on the resumed handle to read and verify the file contents.
 //
 // ============================================================================
 func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	client := lifecycleIntegrationClient(t)
 	ctx := context.Background()
 
-	autoPauseMem := true // 需要一个完整内存快照来支持 autoResume
+	autoPauseMem := true // a full memory snapshot is required to support autoResume
 
-	// ── Step 1: 创建带 autoPause + autoResume 的沙盒 ──
+	// ── Step 1: Create a sandbox with autoPause + autoResume ──
 	t.Log("=== Step 1: Create sandbox with autoPause + autoResume ===")
 	sbx, err := client.NewSandbox(ctx, SandboxConfig{
 		Template:        lifecycleTemplate(t),
-		Timeout:         30, // 30s 后自动暂停
+		Timeout:         30, // auto-pause after 30s
 		AutoPause:       true,
 		AutoPauseMemory: &autoPauseMem,
 		AutoResume:      &AutoResumeConfig{Enabled: true},
@@ -627,7 +627,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	}
 	t.Logf("  created: %s", sbx.ID)
 
-	// 确认生命周期配置
+	// Confirm the lifecycle configuration.
 	info, err := sbx.Info()
 	if err != nil {
 		sbx.Close()
@@ -635,7 +635,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	}
 	t.Logf("  lifecycle: onTimeout=%s autoResume=%v", info.Lifecycle.OnTimeout, info.Lifecycle.AutoResume)
 
-	// ── Step 2: 执行命令写入文件 ──
+	// ── Step 2: Write a file via command execution ──
 	t.Log("=== Step 2: Write file via command.Run ===")
 	const (
 		filePath    = "/tmp/auto-resume-test.txt"
@@ -649,7 +649,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	}
 	t.Logf("  write exit=%d stdout=%q", result.ExitCode, strings.TrimSpace(result.Stdout))
 
-	// 确认文件写入成功
+	// Confirm the file was written successfully.
 	readBeforePause, err := sbx.Commands.Run("cat", []string{filePath})
 	if err != nil {
 		sbx.Close()
@@ -660,7 +660,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 		t.Errorf("file content before pause is wrong: %q", readBeforePause.Stdout)
 	}
 
-	// ── Step 3: 等待自动 pauseds ──
+	// ── Step 3: Wait for the sandbox to auto-pause ──
 	t.Log("=== Step 3: Wait for auto-pause (timeout=30s) ===")
 	deadline := time.After(90 * time.Second)
 	paused := false
@@ -683,13 +683,13 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	}
 	t.Logf("  sandbox auto-paused!")
 
-	// ── Step 4: 额外等待一段时间 (模拟真实场景中 pause 后过一段时间才恢复) ──
+	// ── Step 4: Wait an additional period (simulating a real-world delay between pause and resume) ──
 	waitSeconds := 5
 	t.Logf("=== Step 4: Wait %ds (simulating real-world delay before resume) ===", waitSeconds)
 	time.Sleep(time.Duration(waitSeconds) * time.Second)
 	t.Logf("  waited %ds, now resuming...", waitSeconds)
 
-	// ── Step 5: 通过 Connect 恢复沙盒句柄 ──
+	// ── Step 5: Recover the sandbox handle via Connect ──
 	t.Log("=== Step 5: Connect to resume sandbox ===")
 	resumed, err := client.Connect(ctx, sbx.ID, 120)
 	if err != nil {
@@ -699,7 +699,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 	defer resumed.Close()
 	t.Logf("  resumed sandbox: %s", resumed.ID)
 
-	// 确认状态恢复为 running
+	// Confirm the state has returned to running.
 	info2, err := resumed.Info()
 	if err != nil {
 		t.Fatalf("Info after Connect: %v", err)
@@ -709,7 +709,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 		t.Errorf("expected running after Connect, got %q", info2.State)
 	}
 
-	// ── Step 6: 在恢复的句柄上执行 command.Run 读取文件 ──
+	// ── Step 6: Read the file on the resumed handle via command execution ──
 	t.Log("=== Step 6: Read file on resumed handle via command.Run ===")
 	readResult, err := resumed.Commands.Run("cat", []string{filePath})
 	if err != nil {
@@ -721,7 +721,7 @@ func TestIntegrationAutoResumeConnectAndRead(t *testing.T) {
 		t.Fatalf("file content after resume is wrong: %q", readResult.Stdout)
 	}
 
-	// ── Step 7: 额外验证 — 执行一个新命令 ──
+	// ── Step 7: Extra verification — run a fresh command ──
 	t.Log("=== Step 7: Execute fresh command on resumed handle ===")
 	result2, err := resumed.Commands.Run("bash", []string{"-c", "echo 'fresh-command-after-resume' && ls /tmp/auto-resume-test.txt"})
 	if err != nil {
