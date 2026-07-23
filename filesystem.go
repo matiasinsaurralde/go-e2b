@@ -241,11 +241,23 @@ func (f *FilesystemService) WriteString(ctx context.Context, path string, s stri
 
 // fileURL constructs the envd /files URL for the given path and optional user.
 func (f *FilesystemService) fileURL(path, user string) (string, error) {
-	u, err := url.Parse(f.sandbox.envdBaseURL() + filesRoute)
+	return f.sandbox.filesURL(path, user)
+}
+
+// filesURL builds the envd /files URL for the given path and optional user,
+// without any signature. path is omitted from the query when empty (upload to
+// the default location); user is omitted when empty. It is the single source of
+// truth for the /files route, shared by the filesystem service and the signed
+// URL helpers.
+func (s *Sandbox) filesURL(path, user string) (string, error) {
+	u, err := url.Parse(s.envdBaseURL() + filesRoute)
 	if err != nil {
 		return "", fmt.Errorf("e2b: parse files URL: %w", err)
 	}
-	q := url.Values{"path": {path}}
+	q := url.Values{}
+	if path != "" {
+		q.Set("path", path)
+	}
 	if user != "" {
 		q.Set("username", user)
 	}
