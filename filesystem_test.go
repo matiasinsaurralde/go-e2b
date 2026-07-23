@@ -973,22 +973,42 @@ func TestFilesystemMakeDir(t *testing.T) {
 	}
 }
 
-// TestFilesystemMakeDirExisting verifies MakeDir is idempotent: envd returns
-// HTTP 200 with the entry (no AlreadyExists code) when the directory already
-// exists, so MakeDir must treat that as success.
+// TestFilesystemMakeDirExisting verifies MakeDir is idempotent: envd reports an
+// existing directory with the AlreadyExists code, and MakeDir must treat that as
+// success (matching the reference JS/Python SDKs). It also accepts envd variants
+// that report an existing directory as a plain success response.
 func TestFilesystemMakeDirExisting(t *testing.T) {
 	const dir = "/home/user/existing"
 
-	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
-		mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
-			return connect.NewResponse(&filesystempb.MakeDirResponse{
-				Entry: &filesystempb.EntryInfo{Name: "existing", Path: dir, Type: filesystempb.FileType_FILE_TYPE_DIRECTORY},
-			}), nil
+	tests := []struct {
+		name    string
+		mkdirFn func(context.Context, *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error)
+	}{
+		{
+			// Live envd behavior: existing dir -> AlreadyExists code.
+			name: "already exists code",
+			mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+				return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("directory already exists: "+dir))
+			},
 		},
-	})
+		{
+			// Some envd variants report an existing dir as a plain success.
+			name: "success response",
+			mkdirFn: func(_ context.Context, _ *connect.Request[filesystempb.MakeDirRequest]) (*connect.Response[filesystempb.MakeDirResponse], error) {
+				return connect.NewResponse(&filesystempb.MakeDirResponse{
+					Entry: &filesystempb.EntryInfo{Name: "existing", Path: dir, Type: filesystempb.FileType_FILE_TYPE_DIRECTORY},
+				}), nil
+			},
+		},
+	}
 
-	if err := sbx.Filesystem.MakeDir(context.Background(), dir); err != nil {
-		t.Fatalf("MakeDir on existing dir: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{mkdirFn: tc.mkdirFn})
+			if err := sbx.Filesystem.MakeDir(context.Background(), dir); err != nil {
+				t.Fatalf("MakeDir on existing dir: %v", err)
+			}
+		})
 	}
 }
 

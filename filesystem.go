@@ -362,8 +362,10 @@ func (f *FilesystemService) Exists(ctx context.Context, path string, opts ...Rea
 //
 // Uses the Filesystem/MakeDir gRPC endpoint.
 // Creates directories recursively and is idempotent (mkdir -p semantics):
-// calling it on an existing directory is not an error. envd returns HTTP 200
-// with the entry in that case rather than an AlreadyExists code.
+// calling it on an existing directory is not an error. envd reports an existing
+// directory with the AlreadyExists code, which MakeDir treats as success —
+// matching the reference JS and Python SDKs, whose make_dir swallows
+// already_exists rather than propagating it.
 func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...WriteOption) error {
 	wc := &writeConfig{timeout: DefaultCommandTimeout}
 	for _, o := range opts {
@@ -382,10 +384,15 @@ func (f *FilesystemService) MakeDir(ctx context.Context, path string, opts ...Wr
 
 	_, err := f.getFilesystemClient().MakeDir(ctx, req)
 	if err != nil {
-		if connect.CodeOf(err) == connect.CodeNotFound {
+		switch connect.CodeOf(err) {
+		case connect.CodeAlreadyExists:
+			// The directory already exists; mkdir -p semantics make this a no-op.
+			return nil
+		case connect.CodeNotFound:
 			return &FileNotFoundError{Path: path}
+		default:
+			return fmt.Errorf("e2b: mkdir: %w", err)
 		}
-		return fmt.Errorf("e2b: mkdir: %w", err)
 	}
 	return nil
 }

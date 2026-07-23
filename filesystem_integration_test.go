@@ -359,6 +359,42 @@ func TestIntegrationFilesystemMakeDirNested(t *testing.T) {
 	}
 }
 
+// TestIntegrationFilesystemMakeDirIdempotent verifies that calling MakeDir on an
+// existing directory is a no-op success against live envd, rather than surfacing
+// the AlreadyExists error. This is the mkdir -p semantics the reference SDKs
+// provide.
+func TestIntegrationFilesystemMakeDirIdempotent(t *testing.T) {
+	sbx := newIntegrationSandbox(t)
+	ctx := context.Background()
+
+	dirPath := "/tmp/integration_mkdir_idempotent"
+
+	// First call creates the directory.
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+		t.Fatalf("MakeDir (first): %v", err)
+	}
+
+	// Second call on the now-existing directory must succeed (no error).
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+		t.Fatalf("MakeDir on existing dir returned error, want nil: %v", err)
+	}
+
+	// A third call for good measure — still a no-op.
+	if err := sbx.Filesystem.MakeDir(ctx, dirPath); err != nil {
+		t.Fatalf("MakeDir (third) returned error, want nil: %v", err)
+	}
+
+	// The directory should still be a directory.
+	info, err := sbx.Filesystem.Stat(ctx, dirPath)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", dirPath, err)
+	}
+	if info.Type != "directory" {
+		t.Errorf("Type = %q, want directory", info.Type)
+	}
+	t.Logf("MakeDir idempotent: repeated calls on %s all succeeded", dirPath)
+}
+
 // --- Integration: Remove ---
 
 func TestIntegrationFilesystemRemoveFile(t *testing.T) {
