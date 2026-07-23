@@ -2799,6 +2799,141 @@ func TestListSnapshotsCanceledContext(t *testing.T) {
 	}
 }
 
+// --- DeleteSnapshot tests ---
+
+func TestDeleteSnapshotStatusMapping(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		wantOK  bool
+		wantErr bool
+	}{
+		{"deleted 204", http.StatusNoContent, true, false},
+		{"deleted 200", http.StatusOK, true, false},
+		{"not found", http.StatusNotFound, false, false},
+		{"server error", http.StatusInternalServerError, false, true},
+		{"unauthorized", http.StatusUnauthorized, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("method = %s, want DELETE", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			ok, err := client.DeleteSnapshot(context.Background(), "snap-123")
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantErr {
+				var apiErr *Error
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("expected *Error, got %T: %v", err, err)
+				}
+				if apiErr.StatusCode != tc.status {
+					t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteSnapshotRoute verifies the request targets the templates route with
+// the correct method and auth header, since snapshots share that namespace.
+func TestDeleteSnapshotRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		if r.URL.Path != "/templates/snap-abc" {
+			t.Errorf("path = %s, want /templates/snap-abc", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ok, err := client.DeleteSnapshot(context.Background(), "snap-abc")
+	if err != nil {
+		t.Fatalf("DeleteSnapshot: %v", err)
+	}
+	if !ok {
+		t.Error("ok = false, want true")
+	}
+}
+
+// TestDeleteSnapshotCompoundID verifies a compound snapshot ID (team/name),
+// which is the form the API returns, is percent-escaped into a single path
+// segment rather than leaking the slash into the URL path.
+func TestDeleteSnapshotCompoundID(t *testing.T) {
+	const snapshotID = "team-9da8/my-snap"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// r.URL.Path is already percent-decoded by the server, so the slash
+		// reappears here — but it must be a single segment under /templates/.
+		if r.URL.Path != "/templates/"+snapshotID {
+			t.Errorf("decoded path = %q, want %q", r.URL.Path, "/templates/"+snapshotID)
+		}
+		// The escaped path must carry the percent-encoded slash (%2F) so the
+		// snapshot ID stays a single path segment on the wire.
+		if got, want := r.URL.EscapedPath(), "/templates/team-9da8%2Fmy-snap"; got != want {
+			t.Errorf("escaped path = %q, want %q", got, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ok, err := client.DeleteSnapshot(context.Background(), snapshotID)
+	if err != nil {
+		t.Fatalf("DeleteSnapshot: %v", err)
+	}
+	if !ok {
+		t.Error("ok = false, want true")
+	}
+}
+
+func TestDeleteSnapshotCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := client.DeleteSnapshot(ctx, "snap-123"); err == nil {
+		t.Fatal("expected error for canceled context")
+	}
+}
+
 // --- Connect tests ---
 
 func TestConnectSuccessAlreadyRunning(t *testing.T) {

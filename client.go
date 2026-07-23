@@ -254,6 +254,39 @@ func (c *Client) ListSnapshots(ctx context.Context, opts ...ListSnapshotsOption)
 	}, nil
 }
 
+// DeleteSnapshot deletes a snapshot by its ID (the SnapshotID reported by
+// CreateSnapshot or ListSnapshots). It returns true when the snapshot was
+// deleted and false when no snapshot with that ID exists; a non-nil error is
+// returned only for other failures.
+//
+// Snapshots share the templates namespace on the server, so deletion targets
+// the same DELETE /templates/{id} route used by DeleteTemplate. Unlike
+// DeleteTemplate, a missing snapshot is reported as (false, nil) rather than an
+// error, matching the reference SDKs' delete_snapshot semantics.
+func (c *Client) DeleteSnapshot(ctx context.Context, snapshotID string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.apiBaseURL+"/templates/"+url.PathEscape(snapshotID), nil)
+	if err != nil {
+		return false, fmt.Errorf("e2b: build delete snapshot request: %w", err)
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("e2b: send delete snapshot request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return false, nil
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return true, nil
+	default:
+		respBody, _ := io.ReadAll(resp.Body)
+		return false, &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
+	}
+}
+
 // connectRequest is the request body for the connect endpoint.
 type connectRequest struct {
 	Timeout int `json:"timeout"`

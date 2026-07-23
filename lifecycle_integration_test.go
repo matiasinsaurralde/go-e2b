@@ -924,3 +924,83 @@ func TestIntegrationListSandboxesV2(t *testing.T) {
 
 	t.Logf("=== LIST SANDBOXES V2 INTEGRATION TEST COMPLETED SUCCESSFULLY ===")
 }
+
+// ============================================================================
+// Test: Snapshot create → delete round-trip, and idempotent delete-missing.
+//
+// Run with:
+//
+//	E2B_API_KEY=e2b_xxx go test -tags=integration -v -timeout 20m -run TestIntegrationDeleteSnapshot ./...
+//
+// ============================================================================
+func TestIntegrationDeleteSnapshot(t *testing.T) {
+	client := lifecycleIntegrationClient(t)
+	ctx := context.Background()
+
+	sbx, err := client.NewSandbox(ctx, SandboxConfig{
+		Template: lifecycleTemplate(t),
+		Timeout:  120,
+		Metadata: map[string]string{"test": "delete-snapshot"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	// Best-effort cleanup of the sandbox itself; the test deletes the snapshot.
+	defer sbx.Close()
+
+	name := fmt.Sprintf("delete-snapshot-test-%d", time.Now().UnixNano())
+	snap, err := sbx.CreateSnapshot(ctx, name)
+	if err != nil {
+		// Snapshots require account entitlement; skip rather than fail when the
+		// feature is not enabled for the test account.
+		t.Skipf("CreateSnapshot unavailable (skipping): %v", err)
+	}
+	t.Logf("created snapshot: id=%s names=%v", snap.SnapshotID, snap.Names)
+
+	// Delete it — expect (true, nil).
+	deleted, err := client.DeleteSnapshot(ctx, snap.SnapshotID)
+	if err != nil {
+		t.Fatalf("DeleteSnapshot: %v", err)
+	}
+	if !deleted {
+		t.Errorf("DeleteSnapshot returned false for an existing snapshot %q", snap.SnapshotID)
+	}
+
+	// Deleting again must be idempotent — expect (false, nil).
+	deletedAgain, err := client.DeleteSnapshot(ctx, snap.SnapshotID)
+	if err != nil {
+		t.Fatalf("DeleteSnapshot (second call): %v", err)
+	}
+	if deletedAgain {
+		t.Errorf("second DeleteSnapshot returned true; want false for an already-deleted snapshot")
+	}
+
+	// The snapshot should no longer appear in the account's snapshot list.
+	res, err := client.ListSnapshots(ctx)
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	for _, s := range res.Snapshots {
+		if s.SnapshotID == snap.SnapshotID {
+			t.Errorf("deleted snapshot %q still present in ListSnapshots", snap.SnapshotID)
+		}
+	}
+
+	t.Logf("=== DELETE SNAPSHOT INTEGRATION TEST COMPLETED SUCCESSFULLY ===")
+}
+
+// TestIntegrationDeleteSnapshotMissing verifies that deleting a snapshot that
+// does not exist reports (false, nil) rather than an error, matching the
+// reference SDKs' delete_snapshot semantics. It needs no snapshot entitlement.
+func TestIntegrationDeleteSnapshotMissing(t *testing.T) {
+	client := lifecycleIntegrationClient(t)
+	ctx := context.Background()
+
+	deleted, err := client.DeleteSnapshot(ctx, "nonexistent-snapshot-id-12345")
+	if err != nil {
+		t.Fatalf("DeleteSnapshot(missing): unexpected error: %v", err)
+	}
+	if deleted {
+		t.Error("DeleteSnapshot(missing) returned true; want false")
+	}
+}
