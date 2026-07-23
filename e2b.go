@@ -34,6 +34,13 @@ import (
 )
 
 const (
+	// sdkVersion is the version reported in the User-Agent header.
+	sdkVersion = "0.1.0"
+
+	// userAgent is the SDK User-Agent header sent with HTTP requests, mirroring
+	// the reference SDKs' "e2b-<lang>-sdk/<version>" format.
+	userAgent = "e2b-go-sdk/" + sdkVersion
+
 	// DefaultAPIBaseURL is the default E2B API endpoint.
 	DefaultAPIBaseURL = "https://api.e2b.app"
 
