@@ -60,7 +60,18 @@ func main() {
 }
 ```
 
-See [examples/](examples/) for more usage patterns.
+See [examples/](examples/) for runnable programs:
+
+| Example | Shows |
+|---------|-------|
+| [basic](examples/basic/) | Create a sandbox and run a command |
+| [envvars](examples/envvars/) | Passing environment variables |
+| [files](examples/files/) | Read/write text and binary files |
+| [sandbox-info](examples/sandbox-info/) | Inspecting sandbox metadata |
+| [fork](examples/fork/) | Fork a sandbox into N copies and fan work out |
+| [volumes](examples/volumes/) | Persistent volumes and mounting them |
+| [lifecycle](examples/lifecycle/) | Pause/resume, timeout, and snapshots |
+| [network](examples/network/) | Outbound network policy and allowlists |
 
 ## Usage
 
@@ -175,6 +186,107 @@ sandbox.Pty.SendInput(ctx, pty.PID(), []byte("echo $TERM\n"))
 sandbox.Pty.Resize(ctx, pty.PID(), 120, 40)
 sandbox.Pty.SendInput(ctx, pty.PID(), []byte("exit\n"))
 pty.Wait(ctx)
+```
+
+### Filesystem
+
+`sandbox.Filesystem` provides read/write plus directory and metadata operations.
+Text and byte helpers wrap the streaming `Read`/`Write` methods.
+
+```go
+fs := sandbox.Filesystem
+
+fs.WriteString(ctx, "/home/user/hello.txt", "hi\n")
+content, _ := fs.ReadString(ctx, "/home/user/hello.txt")
+
+entries, _ := fs.List(ctx, "/home/user")   // []FileInfo
+info, _ := fs.Stat(ctx, "/home/user/hello.txt")
+ok, _ := fs.Exists(ctx, "/home/user/hello.txt")
+
+fs.MakeDir(ctx, "/home/user/work")         // no-op if it already exists
+fs.Rename(ctx, "/home/user/hello.txt", "/home/user/work/hi.txt")
+fs.Remove(ctx, "/home/user/work/hi.txt")
+
+// Watch a directory for changes.
+watch, _ := fs.WatchDir(ctx, "/home/user", true)
+events, _ := watch.GetEvents(ctx)
+watch.Stop(ctx)
+```
+
+### Lifecycle: Pause, Resume, and Snapshots
+
+A paused sandbox retains its filesystem and memory, so work resumes exactly
+where it stopped.
+
+```go
+sandbox.SetTimeout(600)             // extend lifetime to 10 minutes
+
+sandbox.Pause()                     // stop running, keep state
+running, _ := sandbox.IsRunning()   // false
+sandbox.Resume(300)                 // resume with a fresh 5-minute lifetime
+
+// Point-in-time snapshot you can reference later.
+snap, _ := sandbox.CreateSnapshot(ctx, "checkpoint")
+
+// Observability.
+logs, _ := sandbox.Logs()
+metrics, _ := sandbox.Metrics()
+```
+
+### Forking
+
+Fork clones a sandbox from a snapshot into one or more independent copies. Every
+fork boots from the same state; after branching they no longer share anything.
+
+```go
+forks, err := sandbox.Fork(ctx, e2b.WithForkCount(3))
+if err != nil {
+    log.Fatal(err)
+}
+for i, f := range forks {
+    if f.Err != nil {          // this fork failed to start
+        continue
+    }
+    defer f.Sandbox.Close()    // each started fork must be closed
+    f.Sandbox.Commands.Run(ctx, fmt.Sprintf("echo worker %d", i))
+}
+```
+
+### Volumes
+
+Volumes are persistent storage that outlives any single sandbox. Write to a
+volume directly through its content API, or mount it into a sandbox.
+
+```go
+vol, _ := client.CreateVolume(ctx, "my-volume")
+vol.WriteFileString(ctx, "/config.txt", "data\n")
+got, _ := vol.ReadFileString(ctx, "/config.txt")
+
+// Mount it into a sandbox — files appear on the sandbox filesystem.
+sandbox, _ := client.NewSandbox(ctx, e2b.SandboxConfig{
+    Template:     "base",
+    VolumeMounts: []e2b.VolumeMount{vol.AsMount("/mnt/data")},
+})
+
+client.DestroyVolume(ctx, vol.VolumeID)
+```
+
+### Network Policy
+
+Restrict a sandbox's outbound access at creation, or change it on a running
+sandbox. `UpdateNetwork` replaces the entire mutable config rather than merging.
+
+```go
+// Allow only example.com; deny everything else.
+sandbox, _ := client.NewSandbox(ctx, e2b.SandboxConfig{
+    Template: "base",
+    Network:  e2b.AllowOutbound("example.com"),
+})
+
+// Later, deny all outbound traffic.
+sandbox.UpdateNetwork(e2b.NetworkUpdateConfig{
+    DenyOut: []string{e2b.AllTraffic},
+})
 ```
 
 ### Command Options

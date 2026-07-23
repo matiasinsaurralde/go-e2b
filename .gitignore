@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Secrets / credentials — never commit
+e2b_key.txt
+.github_pat
+*_key.txt
+*.pat
+
 # Editor/IDE
 # .idea/
 # .vscode/
