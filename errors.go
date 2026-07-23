@@ -131,6 +131,37 @@ func apiErrorFromCode(code int, message string) error {
 	}
 }
 
+// VolumeError is returned when a volume management or content operation fails
+// with a non-2xx status that is not otherwise mapped to a more specific error
+// (e.g. a not-found). It mirrors the reference SDKs' VolumeError/VolumeException.
+type VolumeError struct {
+	// StatusCode is the HTTP status code returned by the volume API.
+	StatusCode int
+
+	// Message describes what went wrong, as reported by the API when available.
+	Message string
+}
+
+// Error implements the error interface.
+func (e *VolumeError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("e2b: volume error: status %d: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("e2b: volume error: status %d", e.StatusCode)
+}
+
+// VolumeNotFoundError is returned when a volume ID does not exist. Content-level
+// (path) 404s use FileNotFoundError instead, matching the FilesystemService
+// error taxonomy.
+type VolumeNotFoundError struct {
+	VolumeID string
+}
+
+// Error implements the error interface.
+func (e *VolumeNotFoundError) Error() string {
+	return fmt.Sprintf("e2b: volume not found: %s", e.VolumeID)
+}
+
 // CommandExitError is returned by CommandHandle.Wait when a command finishes
 // with a non-zero exit code. It embeds the CommandResult so callers can still
 // inspect the captured stdout, stderr, and exit code.
