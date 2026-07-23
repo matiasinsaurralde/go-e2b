@@ -1,6 +1,8 @@
 package e2b
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -68,6 +70,40 @@ func TestTemplateBuildErrorWithoutStep(t *testing.T) {
 	want := "e2b: template build failed: internal server error"
 	if got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestRateLimitError(t *testing.T) {
+	e := &RateLimitError{Message: "429: slow down"}
+	got := e.Error()
+	if !strings.Contains(got, "rate limit") || !strings.Contains(got, "slow down") {
+		t.Errorf("Error() = %q, want rate limit and message", got)
+	}
+
+	empty := &RateLimitError{}
+	if got := empty.Error(); !strings.Contains(got, "rate limit") {
+		t.Errorf("Error() = %q, want rate limit text", got)
+	}
+}
+
+func TestAPIErrorFromCode(t *testing.T) {
+	var ae *AuthenticationError
+	if err := apiErrorFromCode(http.StatusUnauthorized, "bad key"); !errors.As(err, &ae) {
+		t.Errorf("401 -> %v, want *AuthenticationError", err)
+	}
+
+	var rle *RateLimitError
+	if err := apiErrorFromCode(http.StatusTooManyRequests, "slow"); !errors.As(err, &rle) {
+		t.Errorf("429 -> %v, want *RateLimitError", err)
+	}
+
+	var ge *Error
+	err := apiErrorFromCode(http.StatusInternalServerError, "boom")
+	if !errors.As(err, &ge) {
+		t.Fatalf("500 -> %v, want *Error", err)
+	}
+	if ge.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", ge.StatusCode)
 	}
 }
 

@@ -125,16 +125,25 @@ func (c *Client) NewSandbox(ctx context.Context, cfgs ...SandboxConfig) (*Sandbo
 		return nil, fmt.Errorf("e2b: decode create response: %w", err)
 	}
 
+	return c.newSandboxFromResponse(cr.SandboxID, cr.EnvdAccessToken, cr.TrafficAccessToken, cr.Domain), nil
+}
+
+// newSandboxFromResponse builds a *Sandbox from API response fields and wires
+// all of its services. It is shared by NewSandbox, Connect, and ForkSandbox so
+// every sandbox handle is constructed identically. An empty domain falls back
+// to the client-wide sandbox domain when building envd URLs.
+func (c *Client) newSandboxFromResponse(id, envdAccessToken, trafficAccessToken, domain string) *Sandbox {
 	sbx := &Sandbox{
-		ID:                 cr.SandboxID,
-		TrafficAccessToken: cr.TrafficAccessToken,
-		accessToken:        cr.EnvdAccessToken,
+		ID:                 id,
+		TrafficAccessToken: trafficAccessToken,
+		accessToken:        envdAccessToken,
 		client:             c,
+		domain:             domain,
 	}
 	sbx.Commands = newCommandService(sbx)
 	sbx.Pty = newPtyService(sbx)
 	sbx.Filesystem = newFilesystemService(sbx)
-	return sbx, nil
+	return sbx
 }
 
 // ListSandboxes returns all running sandboxes for this client's API key.
@@ -297,16 +306,7 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds i
 		return nil, fmt.Errorf("e2b: decode connect response: %w", err)
 	}
 
-	sbx := &Sandbox{
-		ID:                 cr.SandboxID,
-		TrafficAccessToken: cr.TrafficAccessToken,
-		accessToken:        cr.EnvdAccessToken,
-		client:             c,
-	}
-	sbx.Commands = newCommandService(sbx)
-	sbx.Pty = newPtyService(sbx)
-	sbx.Filesystem = newFilesystemService(sbx)
-	return sbx, nil
+	return c.newSandboxFromResponse(cr.SandboxID, cr.EnvdAccessToken, cr.TrafficAccessToken, cr.Domain), nil
 }
 
 // listSandboxesV2Params holds query parameters for ListSandboxesV2.

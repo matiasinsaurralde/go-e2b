@@ -98,6 +98,12 @@ type Sandbox struct {
 
 	accessToken string
 	client      *Client
+
+	// domain is the per-sandbox base domain returned by the API (empty when
+	// the response omits it). When set, it takes precedence over the
+	// client-wide sandbox domain for building envd URLs. Forks may report a
+	// domain that differs from the client default.
+	domain string
 }
 
 type createRequest struct {
@@ -119,6 +125,7 @@ type createResponse struct {
 	SandboxID          string `json:"sandboxID"`
 	EnvdAccessToken    string `json:"envdAccessToken"`
 	TrafficAccessToken string `json:"trafficAccessToken,omitempty"`
+	Domain             string `json:"domain,omitempty"`
 }
 
 // SandboxLifecycle holds lifecycle configuration for a sandbox.
@@ -152,9 +159,15 @@ type SandboxInfo struct {
 	Network      *NetworkConfig    `json:"network,omitempty"`
 }
 
-// envdBaseURL returns the base URL of the sandbox environment daemon.
+// envdBaseURL returns the base URL of the sandbox environment daemon. It uses
+// the sandbox's own domain when the API reported one, falling back to the
+// client-wide sandbox domain otherwise.
 func (s *Sandbox) envdBaseURL() string {
-	return fmt.Sprintf("https://%d-%s.%s", envdPort, s.ID, s.client.sandboxDomain)
+	host := s.domain
+	if host == "" {
+		host = s.client.sandboxDomain
+	}
+	return fmt.Sprintf("https://%d-%s.%s", envdPort, s.ID, host)
 }
 
 // IsRunning checks whether the sandbox's envd daemon is healthy and

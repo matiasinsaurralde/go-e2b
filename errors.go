@@ -1,6 +1,9 @@
 package e2b
 
-import "fmt"
+import (
+	"fmt"
+	"net/http"
+)
 
 // Error represents an error returned by the E2B API or SDK.
 type Error struct {
@@ -96,6 +99,36 @@ type AuthenticationError struct {
 // Error implements the error interface.
 func (e *AuthenticationError) Error() string {
 	return fmt.Sprintf("e2b: authentication failed: %s", e.Message)
+}
+
+// RateLimitError is returned when the API rejects a request because the rate
+// limit was exceeded (HTTP 429).
+type RateLimitError struct {
+	Message string
+}
+
+// Error implements the error interface.
+func (e *RateLimitError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("e2b: rate limit exceeded: %s", e.Message)
+	}
+	return "e2b: rate limit exceeded"
+}
+
+// apiErrorFromCode maps an API status code and message to a typed error. It is
+// used both for whole-response failures and for error objects embedded in
+// response bodies (for example, per-fork results). The message is prefixed with
+// the code to mirror the reference SDKs' embedded-error formatting.
+func apiErrorFromCode(code int, message string) error {
+	text := fmt.Sprintf("%d: %s", code, message)
+	switch code {
+	case http.StatusUnauthorized:
+		return &AuthenticationError{Message: text}
+	case http.StatusTooManyRequests:
+		return &RateLimitError{Message: text}
+	default:
+		return &Error{StatusCode: code, Message: message}
+	}
 }
 
 // CommandExitError is returned by CommandHandle.Wait when a command finishes
