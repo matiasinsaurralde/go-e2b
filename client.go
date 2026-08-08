@@ -413,9 +413,10 @@ func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Opt
 	}
 	q := baseURL.Query()
 
-	// Append state filters.
-	for _, s := range p.state {
-		q.Add("state", s)
+	// Append state filters as a single comma-separated value.
+	// The E2B API requires ?state=running,paused, NOT ?state=running&state=paused.
+	if len(p.state) > 0 {
+		q.Set("state", strings.Join(p.state, ","))
 	}
 
 	// Append metadata filters (each metadata pair is key=value).

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -1472,9 +1473,18 @@ func TestClientListSandboxesV2FilterByState(t *testing.T) {
 
 func TestClientListSandboxesV2FilterByMultipleStates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		states := r.URL.Query()["state"]
-		if len(states) != 2 {
-			t.Errorf("expected 2 state params, got %d: %v", len(states), states)
+		// Verify state is sent as a single comma-separated value (state=running,paused),
+		// NOT as multiple independent parameters (state=running&state=paused).
+		rawQuery := r.URL.RawQuery
+		stateValues := r.URL.Query()["state"]
+		if len(stateValues) != 1 {
+			t.Errorf("expected exactly 1 state query param (comma-separated), got %d: %v", len(stateValues), stateValues)
+		} else if stateValues[0] != "running,paused" {
+			t.Errorf("state value = %q, want %q", stateValues[0], "running,paused")
+		}
+		// Also verify raw query doesn't contain multiple "state=" keys.
+		if strings.Count(rawQuery, "state=") > 1 {
+			t.Errorf("found multiple state= keys in raw query: %s", rawQuery)
 		}
 
 		w.WriteHeader(http.StatusOK)
