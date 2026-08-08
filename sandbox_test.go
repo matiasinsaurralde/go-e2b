@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -1514,10 +1515,18 @@ func TestClientListSandboxesV2FilterByMultipleStates(t *testing.T) {
 
 func TestClientListSandboxesV2WithMetadata(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify metadata query params are present.
+		// Verify metadata is sent as a SINGLE param whose value is the key=value
+		// pairs joined by "&" (state=... style), NOT as repeated metadata= params.
+		// The E2B API rejects multiple metadata= keys with a 400.
 		metaValues := r.URL.Query()["metadata"]
-		if len(metaValues) != 2 {
-			t.Errorf("expected 2 metadata params, got %d: %v", len(metaValues), metaValues)
+		if len(metaValues) != 1 {
+			t.Errorf("expected exactly 1 metadata param, got %d: %v", len(metaValues), metaValues)
+		} else if metaValues[0] != "app=myapp&env=dev" {
+			// Keys are sorted for determinism, so "app" precedes "env".
+			t.Errorf("metadata value = %q, want %q", metaValues[0], "app=myapp&env=dev")
+		}
+		if strings.Count(r.URL.RawQuery, "metadata=") > 1 {
+			t.Errorf("found multiple metadata= keys in raw query: %s", r.URL.RawQuery)
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -1614,22 +1623,35 @@ func TestClientListSandboxesV2Pagination(t *testing.T) {
 
 func TestClientListSandboxesV2URLEncoding(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify metadata values decode correctly despite special characters.
+		// Metadata is sent as a SINGLE param whose value is the key=value pairs
+		// joined by "&". Special characters within keys/values (&, =, +) must be
+		// URL-encoded so they don't corrupt the outer query or the inner pairs.
 		metaValues := r.URL.Query()["metadata"]
-		expected := map[string]bool{
-			"env=prod":        true,
-			"session=abc&def": true,
-			"key=1+2=3":       true,
+		if len(metaValues) != 1 {
+			t.Fatalf("expected exactly 1 metadata param, got %d: %v", len(metaValues), metaValues)
 		}
-		found := 0
-		for _, mv := range metaValues {
-			t.Logf("decoded metadata: %q", mv)
-			if expected[mv] {
-				found++
-			}
+		// Outer layer is decoded by Query(); inner pair separators/values stay
+		// percent-encoded. Keys are sorted, so order is env, key, session.
+		got := metaValues[0]
+		want := "env=prod&key=1%2B2%3D3&session=abc%26def"
+		if got != want {
+			t.Errorf("metadata value = %q, want %q", got, want)
 		}
-		if found != 3 {
-			t.Errorf("expected 3 metadata values, got %d: %v", found, metaValues)
+
+		// The inner string must parse back to the original key/value pairs,
+		// proving special characters survived the round trip intact.
+		inner, err := url.ParseQuery(got)
+		if err != nil {
+			t.Fatalf("parse inner metadata %q: %v", got, err)
+		}
+		if v := inner.Get("env"); v != "prod" {
+			t.Errorf("inner env = %q, want %q", v, "prod")
+		}
+		if v := inner.Get("session"); v != "abc&def" {
+			t.Errorf("inner session = %q, want %q", v, "abc&def")
+		}
+		if v := inner.Get("key"); v != "1+2=3" {
+			t.Errorf("inner key = %q, want %q", v, "1+2=3")
 		}
 
 		// Verify nextToken decodes correctly.
