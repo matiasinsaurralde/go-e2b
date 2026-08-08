@@ -23,13 +23,21 @@ const filesRoute = "/files"
 
 // FileInfo describes a file written to the sandbox filesystem.
 type FileInfo struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	Type    string    `json:"type,omitempty"`
-	Size    int64     `json:"size,omitempty"`
-	Owner   string    `json:"owner,omitempty"`
-	Group   string    `json:"group,omitempty"`
-	ModTime time.Time `json:"-"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Type is the entry kind: "file", "directory", "symlink", or "unknown".
+	// For a symbolic link, envd reports the type of the resolved target (e.g.
+	// "file", or "unknown" for a dangling link) rather than "symlink"; use a
+	// non-empty SymlinkTarget to detect that an entry is a symlink.
+	Type  string `json:"type,omitempty"`
+	Size  int64  `json:"size,omitempty"`
+	Owner string `json:"owner,omitempty"`
+	Group string `json:"group,omitempty"`
+	// SymlinkTarget is the destination path a symbolic link points to, and is
+	// empty for entries that are not symbolic links. A non-empty value is the
+	// reliable signal that an entry is a symlink.
+	SymlinkTarget string    `json:"symlinkTarget,omitempty"`
+	ModTime       time.Time `json:"-"`
 }
 
 // FilesystemService provides file read and write operations within a sandbox.
@@ -594,12 +602,13 @@ func entryToFileInfo(e *filesystempb.EntryInfo) FileInfo {
 		return FileInfo{}
 	}
 	info := FileInfo{
-		Name:  e.Name,
-		Path:  e.Path,
-		Type:  fileTypeToString(e.Type),
-		Size:  e.Size,
-		Owner: e.Owner,
-		Group: e.Group,
+		Name:          e.Name,
+		Path:          e.Path,
+		Type:          fileTypeToString(e.Type),
+		Size:          e.Size,
+		Owner:         e.Owner,
+		Group:         e.Group,
+		SymlinkTarget: e.GetSymlinkTarget(),
 	}
 	if e.ModifiedTime != nil {
 		info.ModTime = e.ModifiedTime.AsTime()
@@ -614,6 +623,8 @@ func fileTypeToString(t filesystempb.FileType) string {
 		return "file"
 	case filesystempb.FileType_FILE_TYPE_DIRECTORY:
 		return "directory"
+	case filesystempb.FileType_FILE_TYPE_SYMLINK:
+		return "symlink"
 	default:
 		return "unknown"
 	}

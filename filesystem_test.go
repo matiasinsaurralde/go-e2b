@@ -667,6 +667,45 @@ func TestFilesystemList(t *testing.T) {
 	}
 }
 
+func TestFilesystemListSymlink(t *testing.T) {
+	const dir = "/home/user/mydir"
+	const target = "/home/user/mydir/file1.txt"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		listFn: func(_ context.Context, _ *connect.Request[filesystempb.ListDirRequest]) (*connect.Response[filesystempb.ListDirResponse], error) {
+			linkTarget := target
+			return connect.NewResponse(&filesystempb.ListDirResponse{
+				Entries: []*filesystempb.EntryInfo{
+					{Name: "file1.txt", Path: target, Type: filesystempb.FileType_FILE_TYPE_FILE, Size: 100},
+					{Name: "link", Path: dir + "/link", Type: filesystempb.FileType_FILE_TYPE_SYMLINK, SymlinkTarget: &linkTarget},
+				},
+			}), nil
+		},
+	})
+
+	entries, err := sbx.Filesystem.List(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	// The regular file carries no symlink target.
+	if entries[0].Type != "file" {
+		t.Errorf("entries[0].Type = %q, want file", entries[0].Type)
+	}
+	if entries[0].SymlinkTarget != "" {
+		t.Errorf("entries[0].SymlinkTarget = %q, want empty", entries[0].SymlinkTarget)
+	}
+	// The symlink is typed as such and reports its target.
+	if entries[1].Type != "symlink" {
+		t.Errorf("entries[1].Type = %q, want symlink", entries[1].Type)
+	}
+	if entries[1].SymlinkTarget != target {
+		t.Errorf("entries[1].SymlinkTarget = %q, want %q", entries[1].SymlinkTarget, target)
+	}
+}
+
 func TestFilesystemListEmpty(t *testing.T) {
 	const dir = "/empty/dir"
 
@@ -830,6 +869,34 @@ func TestFilesystemStatDir(t *testing.T) {
 	}
 	if info.Type != "directory" {
 		t.Errorf("Type = %q, want directory", info.Type)
+	}
+}
+
+func TestFilesystemStatSymlink(t *testing.T) {
+	const path = "/home/user/link"
+	const target = "/home/user/target.txt"
+
+	sbx := newFilesystemRPCTestSandbox(t, &testFilesystemHandler{
+		statFn: func(_ context.Context, _ *connect.Request[filesystempb.StatRequest]) (*connect.Response[filesystempb.StatResponse], error) {
+			target := target
+			return connect.NewResponse(&filesystempb.StatResponse{
+				Entry: &filesystempb.EntryInfo{
+					Name: "link", Path: path, Type: filesystempb.FileType_FILE_TYPE_SYMLINK,
+					SymlinkTarget: &target,
+				},
+			}), nil
+		},
+	})
+
+	info, err := sbx.Filesystem.Stat(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Type != "symlink" {
+		t.Errorf("Type = %q, want symlink", info.Type)
+	}
+	if info.SymlinkTarget != target {
+		t.Errorf("SymlinkTarget = %q, want %q", info.SymlinkTarget, target)
 	}
 }
 
