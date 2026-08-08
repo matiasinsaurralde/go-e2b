@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -3370,5 +3371,314 @@ func TestNewSandboxFullLifecycleConfig(t *testing.T) {
 	defer func() { _ = sbx.Close() }()
 	if sbx.ID != "sbx-full" {
 		t.Errorf("ID = %q, want %q", sbx.ID, "sbx-full")
+	}
+}
+
+func TestRefreshSuccessNoBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/sandboxes/sbx-123/refreshes" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/refreshes", r.URL.Path)
+		}
+		if got := r.Header.Get("X-API-Key"); got != "test-key" {
+			t.Errorf("X-API-Key = %q, want %q", got, "test-key")
+		}
+		// No duration configured: the request body must be empty and no
+		// Content-Type header should be set.
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("Content-Type = %q, want empty", got)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if len(body) != 0 {
+			t.Errorf("body = %q, want empty", string(body))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+}
+
+func TestRefreshWithDuration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/sbx-123/refreshes" {
+			t.Errorf("path = %s, want /sandboxes/sbx-123/refreshes", r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		var body refreshRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Duration != 120 {
+			t.Errorf("duration = %d, want 120", body.Duration)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.Refresh(WithRefreshDuration(120)); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+}
+
+func TestRefreshWithDurationZero(t *testing.T) {
+	// duration=0 is a valid boundary and must still be serialized in the body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		var body refreshRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Duration != 0 {
+			t.Errorf("duration = %d, want 0", body.Duration)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.Refresh(WithRefreshDuration(0)); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+}
+
+func TestRefreshWithContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.RefreshWithContext(context.Background(), WithRefreshDuration(60)); err != nil {
+		t.Fatalf("RefreshWithContext: %v", err)
+	}
+}
+
+func TestRefreshOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	if err := sbx.Refresh(WithRefreshDuration(60)); err != nil {
+		t.Fatalf("Refresh with 200 OK: %v", err)
+	}
+}
+
+func TestRefreshDurationOutOfRange(t *testing.T) {
+	// The client must reject out-of-range durations without contacting the
+	// server at all.
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("server must not be called for a client-side validation failure")
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	for _, d := range []int{-1, MaxRefreshDuration + 1, 99999} {
+		err := sbx.Refresh(WithRefreshDuration(d))
+		if err == nil {
+			t.Fatalf("duration=%d: expected error", d)
+		}
+		var e *InvalidArgumentError
+		if !errors.As(err, &e) {
+			t.Fatalf("duration=%d: expected *InvalidArgumentError, got %T: %v", d, err, err)
+		}
+	}
+}
+
+func TestRefreshNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":404,"message":"sandbox not found"}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-gone",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.Refresh(WithRefreshDuration(60))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *SandboxNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	if e.SandboxID != "sbx-gone" {
+		t.Errorf("SandboxID = %q, want %q", e.SandboxID, "sbx-gone")
+	}
+}
+
+func TestRefreshInvalidSandboxID(t *testing.T) {
+	// The live API returns 400 "Invalid sandbox ID" (not 404) for a malformed
+	// ID; the SDK maps this to SandboxNotFoundError, mirroring Connect/Fork.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":400,"message":"Invalid sandbox ID"}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "bad-id",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.Refresh(WithRefreshDuration(60))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *SandboxNotFoundError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	if e.SandboxID != "bad-id" {
+		t.Errorf("SandboxID = %q, want %q", e.SandboxID, "bad-id")
+	}
+}
+
+func TestRefreshUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.Refresh()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *AuthenticationError
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *AuthenticationError, got %T: %v", err, err)
+	}
+}
+
+func TestRefreshServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	err := sbx.Refresh()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if e.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", e.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestRefreshCanceledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sbx := &Sandbox{
+		ID: "sbx-123",
+		client: &Client{
+			apiKey:     "test-key",
+			apiBaseURL: srv.URL,
+			httpClient: http.DefaultClient,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sbx.RefreshWithContext(ctx); err == nil {
+		t.Fatal("expected error for canceled context")
 	}
 }

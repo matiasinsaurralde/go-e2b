@@ -1004,3 +1004,82 @@ func TestIntegrationDeleteSnapshotMissing(t *testing.T) {
 		t.Error("DeleteSnapshot(missing) returned true; want false")
 	}
 }
+
+// ============================================================================
+// Test: Refresh — extend a running sandbox's TTL via POST /sandboxes/{id}/refreshes
+//
+// Run with:
+//
+//	E2B_API_KEY=e2b_xxx go test -tags=integration -v -timeout 5m -run TestIntegrationRefresh ./...
+//
+// ============================================================================
+func TestIntegrationRefresh(t *testing.T) {
+	client := lifecycleIntegrationClient(t)
+	ctx := context.Background()
+
+	sbx, err := client.NewSandbox(ctx, SandboxConfig{
+		Template: lifecycleTemplate(t),
+		Timeout:  30,
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer sbx.Close()
+	t.Logf("Created sandbox: %s", sbx.ID)
+
+	// Refresh with no body: the server applies its default duration and keeps
+	// the sandbox alive.
+	if err := sbx.RefreshWithContext(ctx); err != nil {
+		t.Fatalf("Refresh (no body): %v", err)
+	}
+	t.Log("Refresh (no body) OK")
+
+	// Capture the current expiry, then refresh with an explicit longer duration
+	// and confirm the expiry moves forward.
+	before, err := sbx.InfoWithContext(ctx)
+	if err != nil {
+		t.Fatalf("Info before refresh: %v", err)
+	}
+	beforeEnd, err := time.Parse(time.RFC3339, before.EndAt)
+	if err != nil {
+		t.Fatalf("parse EndAt %q: %v", before.EndAt, err)
+	}
+
+	if err := sbx.RefreshWithContext(ctx, WithRefreshDuration(600)); err != nil {
+		t.Fatalf("Refresh (duration=600): %v", err)
+	}
+	t.Log("Refresh (duration=600) OK")
+
+	after, err := sbx.InfoWithContext(ctx)
+	if err != nil {
+		t.Fatalf("Info after refresh: %v", err)
+	}
+	afterEnd, err := time.Parse(time.RFC3339, after.EndAt)
+	if err != nil {
+		t.Fatalf("parse EndAt %q: %v", after.EndAt, err)
+	}
+
+	t.Logf("EndAt before=%s after=%s", beforeEnd, afterEnd)
+	if !afterEnd.After(beforeEnd) {
+		t.Errorf("expected EndAt to move forward after refresh: before=%s after=%s", beforeEnd, afterEnd)
+	}
+}
+
+func TestIntegrationRefreshNotFound(t *testing.T) {
+	client := lifecycleIntegrationClient(t)
+	ctx := context.Background()
+
+	// A refresh against a nonexistent/malformed sandbox must surface as
+	// SandboxNotFoundError (the API returns 400 "Invalid sandbox ID", which the
+	// SDK maps to the typed error).
+	sbx := &Sandbox{ID: "nonexistent-sandbox-id-12345", client: client}
+	err := sbx.RefreshWithContext(ctx, WithRefreshDuration(60))
+	if err == nil {
+		t.Fatal("expected error refreshing nonexistent sandbox")
+	}
+	var nf *SandboxNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("expected *SandboxNotFoundError, got %T: %v", err, err)
+	}
+	t.Logf("got expected error: %v", err)
+}
