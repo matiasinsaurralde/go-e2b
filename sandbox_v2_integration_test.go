@@ -18,16 +18,10 @@ func listV2IntegrationClient(t *testing.T) *Client {
 
 	apiKey := os.Getenv("E2B_API_KEY")
 	if apiKey == "" {
-		apiKey = os.Getenv("WEKNORA_SANDBOX_E2B_API_KEY")
-	}
-	if apiKey == "" {
-		t.Skip("E2B_API_KEY or WEKNORA_SANDBOX_E2B_API_KEY not set, skipping integration test")
+		t.Skip("E2B_API_KEY not set, skipping integration test")
 	}
 
 	apiURL := os.Getenv("E2B_API_URL")
-	if apiURL == "" {
-		apiURL = os.Getenv("WEKNORA_SANDBOX_E2B_API_URL")
-	}
 
 	cfg := ClientConfig{APIKey: apiKey}
 	if apiURL != "" {
@@ -44,9 +38,6 @@ func listV2IntegrationClient(t *testing.T) *Client {
 func listV2Template(t *testing.T) string {
 	t.Helper()
 	tmpl := os.Getenv("E2B_TEMPLATE")
-	if tmpl == "" {
-		tmpl = os.Getenv("WEKNORA_SANDBOX_E2B_TEMPLATE")
-	}
 	if tmpl == "" {
 		tmpl = "base"
 	}
