@@ -268,3 +268,64 @@ func TestIntegrationListSandboxesV2PaginationWithState(t *testing.T) {
 
 	t.Log("SUCCESS: Multi-state + pagination works correctly.")
 }
+
+// TestIntegrationListSandboxesV2MultiMetadata verifies filtering by MULTIPLE
+// metadata keys. The E2B API treats metadata as a single string of key=value
+// pairs joined by "&" (e.g. metadata=env%3Ddev%26app%3Dprod), NOT as repeated
+// metadata= params. The original buggy code sent repeated params, which the API
+// rejects with:
+//
+//	"multiple values for single value parameter 'metadata'"
+//
+// A single-key filter happened to work; this test exercises the multi-key path
+// that was broken.
+func TestIntegrationListSandboxesV2MultiMetadata(t *testing.T) {
+	client := listV2IntegrationClient(t)
+	ctx := context.Background()
+	tmpl := listV2Template(t)
+
+	// Use a value unlikely to collide with other sandboxes on the account.
+	const runTag = "go-e2b-multi-meta-test"
+
+	sbx, err := client.NewSandbox(ctx, SandboxConfig{
+		Template: tmpl,
+		Timeout:  120,
+		Metadata: map[string]string{"suite": runTag, "kind": "multimeta"},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	defer func() { _ = sbx.Close() }()
+	t.Logf("Created sandbox with metadata: %s", sbx.ID)
+
+	// Filter by BOTH metadata keys. With the buggy code this produced two
+	// metadata= params and failed with a 400.
+	result, err := client.ListSandboxesV2(ctx,
+		WithSandboxMetadata(map[string]string{"suite": runTag, "kind": "multimeta"}),
+	)
+	if err != nil {
+		t.Fatalf(
+			"ListSandboxesV2(metadata suite=%s,kind=multimeta): %v\n\n"+
+				"BUG: If you see a 400 mentioning 'multiple values for single value parameter',\n"+
+				"the SDK is sending repeated metadata= params instead of one comma/&-joined value.",
+			runTag, err,
+		)
+	}
+
+	t.Logf("Found %d sandboxes matching both metadata keys", len(result.Sandboxes))
+	found := false
+	for _, s := range result.Sandboxes {
+		t.Logf("  id=%s metadata=%v", s.ID, s.Metadata)
+		if s.ID == sbx.ID {
+			found = true
+			if s.Metadata["suite"] != runTag || s.Metadata["kind"] != "multimeta" {
+				t.Errorf("sandbox %s metadata = %v, want suite=%s kind=multimeta", s.ID, s.Metadata, runTag)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("created sandbox %s not found when filtering by both metadata keys", sbx.ID)
+	}
+
+	t.Log("SUCCESS: Multi-key metadata filter works correctly.")
+}

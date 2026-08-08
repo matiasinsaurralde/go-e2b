@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -419,9 +420,20 @@ func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Opt
 		q.Set("state", strings.Join(p.state, ","))
 	}
 
-	// Append metadata filters (each metadata pair is key=value).
-	for k, v := range p.metadata {
-		q.Add("metadata", k+"="+v)
+	// Append metadata filter as a single string of key=value pairs joined by "&".
+	// The E2B API treats metadata as ONE string value (e.g. "user=abc&app=prod"),
+	// NOT as repeated metadata= params. Each key and value must be URL-encoded.
+	if len(p.metadata) > 0 {
+		keys := make([]string, 0, len(p.metadata))
+		for k := range p.metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // deterministic order for stable tests
+		pairs := make([]string, 0, len(p.metadata))
+		for _, k := range keys {
+			pairs = append(pairs, url.QueryEscape(k)+"="+url.QueryEscape(p.metadata[k]))
+		}
+		q.Set("metadata", strings.Join(pairs, "&"))
 	}
 
 	if p.limit > 0 {
