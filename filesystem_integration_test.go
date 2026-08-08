@@ -907,3 +907,66 @@ func TestIntegrationFilesystemWatchDirRecursive(t *testing.T) {
 		t.Logf("  event: type=%s name=%s", e.Type, e.Name)
 	}
 }
+
+// --- Integration: symlink Type and SymlinkTarget via Stat and List ---
+
+func TestIntegrationFilesystemSymlink(t *testing.T) {
+	sbx := newIntegrationSandbox(t)
+	ctx := context.Background()
+
+	dir := fmt.Sprintf("/tmp/symlink_test_%d", time.Now().UnixNano())
+	target := dir + "/target.txt"
+	link := dir + "/link"
+
+	// Create a real symlink inside the sandbox: a regular target file and a
+	// symbolic link pointing at it.
+	setup := fmt.Sprintf("mkdir -p %s && printf hello > %s && ln -s %s %s", dir, target, target, link)
+	if res, err := sbx.Commands.Run(ctx, setup); err != nil {
+		t.Fatalf("setup command: %v (stderr=%q)", err, res.Stderr)
+	}
+
+	// Stat the link. Note the live envd contract (verified against api.e2b.dev):
+	// it does NOT report Type == "symlink"; Type reflects the *resolved* target
+	// ("file" here), matching stat-follows-symlink semantics. The reliable
+	// symlink signal is a non-empty SymlinkTarget, which is exactly the field
+	// this change adds. (The generated proto also defines FILE_TYPE_SYMLINK, so
+	// the SDK maps it to "symlink" for forward-compatibility if envd starts
+	// emitting it.)
+	info, err := sbx.Filesystem.Stat(ctx, link)
+	if err != nil {
+		t.Fatalf("Stat(link): %v", err)
+	}
+	t.Logf("Stat link: type=%q target=%q", info.Type, info.SymlinkTarget)
+	if info.SymlinkTarget != target {
+		t.Errorf("Stat(link).SymlinkTarget = %q, want %q", info.SymlinkTarget, target)
+	}
+
+	// List the directory: the link entry must carry its target, while the
+	// regular file must not.
+	entries, err := sbx.Filesystem.List(ctx, dir)
+	if err != nil {
+		t.Fatalf("List(dir): %v", err)
+	}
+	var linkEntry, fileEntry *FileInfo
+	for i := range entries {
+		switch entries[i].Name {
+		case "link":
+			linkEntry = &entries[i]
+		case "target.txt":
+			fileEntry = &entries[i]
+		}
+		t.Logf("List entry: name=%q type=%q target=%q", entries[i].Name, entries[i].Type, entries[i].SymlinkTarget)
+	}
+	if linkEntry == nil {
+		t.Fatal("List did not return the symlink entry")
+	}
+	if linkEntry.SymlinkTarget != target {
+		t.Errorf("List link.SymlinkTarget = %q, want %q", linkEntry.SymlinkTarget, target)
+	}
+	if fileEntry == nil {
+		t.Fatal("List did not return the regular-file entry")
+	}
+	if fileEntry.SymlinkTarget != "" {
+		t.Errorf("List target.txt.SymlinkTarget = %q, want empty", fileEntry.SymlinkTarget)
+	}
+}
