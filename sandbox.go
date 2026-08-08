@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // SandboxConfig holds the configuration for creating a new sandbox.
@@ -302,6 +303,99 @@ func (s *Sandbox) SetTimeoutWithContext(ctx context.Context, timeoutSeconds int)
 		respBody, _ := io.ReadAll(resp.Body)
 		return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
 	}
+}
+
+// MaxRefreshDuration is the largest duration (in seconds) accepted by the
+// sandbox refresh endpoint. Requesting more is rejected client-side.
+const MaxRefreshDuration = 3600
+
+// refreshParams holds options for a Refresh request.
+type refreshParams struct {
+	duration    int
+	durationSet bool
+}
+
+// RefreshOption configures a Refresh / RefreshWithContext request.
+type RefreshOption func(*refreshParams)
+
+// WithRefreshDuration extends the sandbox lifetime by durationSeconds from now,
+// keeping it alive for that many additional seconds. Valid range is 0 to
+// MaxRefreshDuration (3600). When omitted, the server applies its default
+// refresh duration.
+func WithRefreshDuration(durationSeconds int) RefreshOption {
+	return func(p *refreshParams) {
+		p.duration = durationSeconds
+		p.durationSet = true
+	}
+}
+
+type refreshRequest struct {
+	Duration int `json:"duration"`
+}
+
+// Refresh extends the sandbox's time-to-live, keeping it alive.
+// Without options the server applies its default refresh duration; pass
+// WithRefreshDuration to specify how many seconds to keep it alive for.
+func (s *Sandbox) Refresh(opts ...RefreshOption) error {
+	return s.RefreshWithContext(context.Background(), opts...)
+}
+
+// RefreshWithContext extends the sandbox's time-to-live using the provided context.
+func (s *Sandbox) RefreshWithContext(ctx context.Context, opts ...RefreshOption) error {
+	var p refreshParams
+	for _, o := range opts {
+		o(&p)
+	}
+
+	// Only serialize a body when a duration was explicitly requested; the
+	// endpoint's request body is optional, so an unconfigured Refresh sends
+	// an empty POST and lets the server pick its default duration.
+	var reqBody io.Reader
+	if p.durationSet {
+		if p.duration < 0 || p.duration > MaxRefreshDuration {
+			return &InvalidArgumentError{Message: fmt.Sprintf("duration must be between 0 and %d seconds", MaxRefreshDuration)}
+		}
+		body, err := json.Marshal(refreshRequest{Duration: p.duration})
+		if err != nil {
+			return fmt.Errorf("e2b: marshal refresh request: %w", err)
+		}
+		reqBody = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.client.apiBaseURL+"/sandboxes/"+s.ID+"/refreshes", reqBody)
+	if err != nil {
+		return fmt.Errorf("e2b: build refresh request: %w", err)
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-API-Key", s.client.apiKey)
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("e2b: send refresh request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	// A missing sandbox surfaces as 404; a malformed sandbox ID surfaces as 400
+	// with an "invalid sandbox ID" message. Map both to the typed
+	// SandboxNotFoundError so callers handle "no such sandbox" uniformly
+	// (mirrors Client.Connect and ForkSandbox), while routing 401/429 through
+	// the shared code mapping.
+	if resp.StatusCode == http.StatusNotFound ||
+		(resp.StatusCode == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(string(respBody)), "invalid sandbox id")) {
+		return &SandboxNotFoundError{SandboxID: s.ID}
+	}
+	if msg := errorMessageFromBody(respBody); msg != "" {
+		return apiErrorFromCode(resp.StatusCode, msg)
+	}
+	return &Error{StatusCode: resp.StatusCode, Message: string(respBody)}
 }
 
 // pauseParams holds options for a Pause request.
