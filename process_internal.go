@@ -53,8 +53,10 @@ func pidSelector(pid uint32) *processpb.ProcessSelector {
 }
 
 // mapProcessRPCError converts a Connect/gRPC error from an envd process RPC into
-// a typed SDK error. Errors that are already typed pass through unchanged.
-func mapProcessRPCError(err error) error {
+// a typed SDK error. Errors that are already typed pass through unchanged. The
+// sandboxID is threaded through so a NotFound maps to a *SandboxNotFoundError
+// that names the sandbox rather than producing a blank identifier.
+func mapProcessRPCError(err error, sandboxID string) error {
 	if err == nil {
 		return nil
 	}
@@ -67,7 +69,7 @@ func mapProcessRPCError(err error) error {
 	msg := connectErr.Message()
 	switch connectErr.Code() {
 	case connect.CodeNotFound:
-		return &SandboxNotFoundError{SandboxID: ""}
+		return &SandboxNotFoundError{SandboxID: sandboxID}
 	case connect.CodeInvalidArgument:
 		return &InvalidArgumentError{Message: msg}
 	case connect.CodeUnauthenticated, connect.CodePermissionDenied:

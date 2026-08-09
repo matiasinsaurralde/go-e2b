@@ -103,6 +103,11 @@ const (
 type CommandHandle struct {
 	pid uint32
 
+	// sandboxID identifies the sandbox this handle belongs to. It is used to
+	// name the sandbox in a *SandboxNotFoundError when a process RPC fails with
+	// NotFound.
+	sandboxID string
+
 	stream eventStream
 
 	// handleKill kills the process (SIGKILL). Returns false if not found.
@@ -239,7 +244,7 @@ func (h *CommandHandle) Wait(ctx context.Context, opts ...WaitOption) (*CommandR
 	if err := h.stream.Err(); err != nil {
 		// Flush any buffered partial runes so trailing bytes are not dropped.
 		h.flush(&wo)
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, h.sandboxID)
 	}
 
 	h.mu.Lock()
@@ -485,12 +490,14 @@ func joinChunks(chunks []string) string {
 // startEventStream reads the first event from a freshly opened stream, which
 // must be a Start event carrying the PID. It returns the PID or an error if the
 // first event is missing or of the wrong kind. On error it closes the stream.
-func startEventStream(stream eventStream) (uint32, error) {
+// sandboxID names the sandbox in a *SandboxNotFoundError when the stream fails
+// with a NotFound RPC error.
+func startEventStream(stream eventStream, sandboxID string) (uint32, error) {
 	if !stream.Receive() {
 		err := stream.Err()
 		_ = stream.Close()
 		if err != nil {
-			return 0, mapProcessRPCError(err)
+			return 0, mapProcessRPCError(err, sandboxID)
 		}
 		return 0, &Error{Message: "process stream closed before start event"}
 	}

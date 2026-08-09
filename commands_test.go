@@ -299,6 +299,23 @@ func TestStartStreamError(t *testing.T) {
 	}
 }
 
+// TestStartStreamNotFoundNamesSandbox verifies that a NotFound surfaced by the
+// start event stream maps to a *SandboxNotFoundError naming the sandbox.
+func TestStartStreamNotFoundNamesSandbox(t *testing.T) {
+	sbx := newTestSandbox(t, func(_ context.Context, _ *connect.Request[processpb.StartRequest], _ *connect.ServerStream[processpb.StartResponse]) error {
+		return connect.NewError(connect.CodeNotFound, errors.New("gone"))
+	})
+
+	_, err := sbx.Commands.Run(context.Background(), "cmd")
+	var nf *SandboxNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("error = %T, want *SandboxNotFoundError", err)
+	}
+	if nf.SandboxID != sbx.ID {
+		t.Errorf("SandboxID = %q, want %q", nf.SandboxID, sbx.ID)
+	}
+}
+
 func TestStartNoStartEvent(t *testing.T) {
 	// First event is data, not start → error.
 	sbx := newTestSandbox(t, func(_ context.Context, _ *connect.Request[processpb.StartRequest], stream *connect.ServerStream[processpb.StartResponse]) error {
@@ -406,6 +423,29 @@ func TestListError(t *testing.T) {
 	var authErr *AuthenticationError
 	if !errors.As(err, &authErr) {
 		t.Fatalf("error = %T, want *AuthenticationError", err)
+	}
+}
+
+// TestListNotFoundNamesSandbox verifies that a NotFound from a process RPC maps
+// to a *SandboxNotFoundError that names the sandbox rather than leaving the ID
+// blank (which produced the message "e2b: sandbox not found: ").
+func TestListNotFoundNamesSandbox(t *testing.T) {
+	sbx := newTestSandboxWith(t, &testProcessServer{
+		listFn: func(_ context.Context, _ *connect.Request[processpb.ListRequest]) (*connect.Response[processpb.ListResponse], error) {
+			return nil, connect.NewError(connect.CodeNotFound, errors.New("gone"))
+		},
+	})
+
+	_, err := sbx.Commands.List(context.Background())
+	var nf *SandboxNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("error = %T, want *SandboxNotFoundError", err)
+	}
+	if nf.SandboxID != sbx.ID {
+		t.Errorf("SandboxID = %q, want %q", nf.SandboxID, sbx.ID)
+	}
+	if strings.HasSuffix(err.Error(), ": ") {
+		t.Errorf("error message has blank sandbox ID: %q", err.Error())
 	}
 }
 

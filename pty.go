@@ -114,11 +114,11 @@ func (p *PtyService) Create(ctx context.Context, cols, rows uint32, opts ...PtyO
 	client := p.sandbox.processClient()
 	stream, err := client.Start(ctx, req)
 	if err != nil {
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, p.sandbox.ID)
 	}
 
 	adapter := &startStream{s: stream}
-	pid, err := startEventStream(adapter)
+	pid, err := startEventStream(adapter, p.sandbox.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -157,11 +157,11 @@ func (p *PtyService) Connect(ctx context.Context, pid uint32, opts ...PtyOption)
 	client := p.sandbox.processClient()
 	stream, err := client.Connect(ctx, req)
 	if err != nil {
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, p.sandbox.ID)
 	}
 
 	adapter := &connectStream{s: stream}
-	gotPID, err := startEventStream(adapter)
+	gotPID, err := startEventStream(adapter, p.sandbox.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +184,7 @@ func (p *PtyService) SendInput(ctx context.Context, pid uint32, data []byte) err
 
 	client := p.sandbox.processClient()
 	if _, err := client.SendInput(ctx, req); err != nil {
-		return mapProcessRPCError(err)
+		return mapProcessRPCError(err, p.sandbox.ID)
 	}
 	return nil
 }
@@ -202,7 +202,7 @@ func (p *PtyService) Resize(ctx context.Context, pid, cols, rows uint32) error {
 
 	client := p.sandbox.processClient()
 	if _, err := client.Update(ctx, req); err != nil {
-		return mapProcessRPCError(err)
+		return mapProcessRPCError(err, p.sandbox.ID)
 	}
 	return nil
 }
@@ -221,7 +221,7 @@ func (p *PtyService) Kill(ctx context.Context, pid uint32) (bool, error) {
 		if isNotFound(err) {
 			return false, nil
 		}
-		return false, mapProcessRPCError(err)
+		return false, mapProcessRPCError(err, p.sandbox.ID)
 	}
 	return true, nil
 }
@@ -232,6 +232,7 @@ func (p *PtyService) Kill(ctx context.Context, pid uint32) (bool, error) {
 func (p *PtyService) newHandle(pid uint32, stream eventStream, onData func([]byte)) *CommandHandle {
 	return &CommandHandle{
 		pid:        pid,
+		sandboxID:  p.sandbox.ID,
 		stream:     stream,
 		handleKill: func(ctx context.Context) (bool, error) { return p.Kill(ctx, pid) },
 		onPty:      onData,
