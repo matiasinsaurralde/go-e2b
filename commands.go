@@ -137,11 +137,11 @@ func (c *CommandService) Start(ctx context.Context, cmd string, opts ...RunOptio
 	client := c.sandbox.processClient()
 	stream, err := client.Start(ctx, req)
 	if err != nil {
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, c.sandbox.ID)
 	}
 
 	adapter := &startStream{s: stream}
-	pid, err := startEventStream(adapter)
+	pid, err := startEventStream(adapter, c.sandbox.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -190,11 +190,11 @@ func (c *CommandService) Connect(ctx context.Context, pid uint32, opts ...Connec
 	client := c.sandbox.processClient()
 	stream, err := client.Connect(ctx, req)
 	if err != nil {
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, c.sandbox.ID)
 	}
 
 	adapter := &connectStream{s: stream}
-	gotPID, err := startEventStream(adapter)
+	gotPID, err := startEventStream(adapter, c.sandbox.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +210,7 @@ func (c *CommandService) List(ctx context.Context) ([]ProcessInfo, error) {
 	client := c.sandbox.processClient()
 	resp, err := client.List(ctx, req)
 	if err != nil {
-		return nil, mapProcessRPCError(err)
+		return nil, mapProcessRPCError(err, c.sandbox.ID)
 	}
 
 	processes := resp.Msg.GetProcesses()
@@ -245,7 +245,7 @@ func (c *CommandService) Kill(ctx context.Context, pid uint32) (bool, error) {
 		if isNotFound(err) {
 			return false, nil
 		}
-		return false, mapProcessRPCError(err)
+		return false, mapProcessRPCError(err, c.sandbox.ID)
 	}
 	return true, nil
 }
@@ -263,7 +263,7 @@ func (c *CommandService) SendStdin(ctx context.Context, pid uint32, data []byte)
 
 	client := c.sandbox.processClient()
 	if _, err := client.SendInput(ctx, req); err != nil {
-		return mapProcessRPCError(err)
+		return mapProcessRPCError(err, c.sandbox.ID)
 	}
 	return nil
 }
@@ -278,7 +278,7 @@ func (c *CommandService) CloseStdin(ctx context.Context, pid uint32) error {
 
 	client := c.sandbox.processClient()
 	if _, err := client.CloseStdin(ctx, req); err != nil {
-		return mapProcessRPCError(err)
+		return mapProcessRPCError(err, c.sandbox.ID)
 	}
 	return nil
 }
@@ -288,6 +288,7 @@ func (c *CommandService) CloseStdin(ctx context.Context, pid uint32) error {
 func (c *CommandService) newHandle(pid uint32, stream eventStream, onStdout, onStderr, onPty func([]byte)) *CommandHandle {
 	return &CommandHandle{
 		pid:              pid,
+		sandboxID:        c.sandbox.ID,
 		stream:           stream,
 		handleKill:       func(ctx context.Context) (bool, error) { return c.Kill(ctx, pid) },
 		handleSendStdin:  func(ctx context.Context, data []byte) error { return c.SendStdin(ctx, pid, data) },
