@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ClientConfig configures a new Client.
@@ -343,12 +344,21 @@ func (c *Client) Connect(ctx context.Context, sandboxID string, timeoutSeconds i
 	return c.newSandboxFromResponse(cr.SandboxID, cr.EnvdAccessToken, cr.TrafficAccessToken, cr.Domain), nil
 }
 
+// OrderAsc / OrderDesc are the allowed values for WithSandboxOrder.
+const (
+	OrderAsc  = "asc"
+	OrderDesc = "desc"
+)
+
 // listSandboxesV2Params holds query parameters for ListSandboxesV2.
 type listSandboxesV2Params struct {
-	state     []string
-	metadata  map[string]string
-	limit     int
-	nextToken string
+	state        []string
+	metadata     map[string]string
+	limit        int
+	nextToken    string
+	order        string
+	startedAfter time.Time
+	template     string
 }
 
 // ListSandboxesV2Option configures a ListSandboxesV2 request.
@@ -375,6 +385,26 @@ func WithSandboxNextToken(token string) ListSandboxesV2Option {
 	return func(p *listSandboxesV2Params) { p.nextToken = token }
 }
 
+// WithSandboxOrder sorts the matching set by start time before pagination.
+// Allowed values: OrderAsc, OrderDesc. Omitted → the API default (desc, newest first).
+// Empty and unknown values are sent as-is (or omitted if empty); the server
+// rejects invalid order values with HTTP 400.
+func WithSandboxOrder(order string) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.order = order }
+}
+
+// WithSandboxStartedAfter keeps sandboxes whose startedAt is >= t (inclusive).
+// t is sent as RFC 3339 in UTC. A zero Time is ignored (same as omitting the option).
+func WithSandboxStartedAfter(t time.Time) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.startedAfter = t }
+}
+
+// WithSandboxTemplate keeps sandboxes created from this template ID or alias
+// (exact match, e.g. "base" or a custom template ID).
+func WithSandboxTemplate(template string) ListSandboxesV2Option {
+	return func(p *listSandboxesV2Params) { p.template = template }
+}
+
 // ListSandboxesV2Result holds the result of a ListSandboxesV2 call, including pagination.
 type ListSandboxesV2Result struct {
 	Sandboxes []SandboxInfo
@@ -382,8 +412,8 @@ type ListSandboxesV2Result struct {
 }
 
 // ListSandboxesV2 returns all sandboxes (running and paused) for this client's API key
-// using the v2 endpoint. It supports filtering by state and metadata, plus cursor-based
-// pagination via limit and nextToken.
+// using the v2 endpoint. It supports filtering by state, metadata, template, and
+// startedAfter, plus sort order and cursor-based pagination via limit and nextToken.
 //
 // Example:
 //
@@ -396,7 +426,14 @@ type ListSandboxesV2Result struct {
 //	// Filter by metadata.
 //	result, err := client.ListSandboxesV2(ctx, WithSandboxMetadata(map[string]string{"env": "dev"}))
 //
-//	// Pagination.
+//	// Sort oldest first, filter by template and start time.
+//	result, err := client.ListSandboxesV2(ctx,
+//		WithSandboxOrder(OrderAsc),
+//		WithSandboxTemplate("base"),
+//		WithSandboxStartedAfter(time.Now().Add(-24*time.Hour)),
+//	)
+//
+//	// Pagination. Re-pass the same filters on every page.
 //	result, err := client.ListSandboxesV2(ctx, WithSandboxLimit(10))
 //	for result.NextToken != "" {
 //		next, err := client.ListSandboxesV2(ctx, WithSandboxNextToken(result.NextToken))
@@ -441,6 +478,15 @@ func (c *Client) ListSandboxesV2(ctx context.Context, opts ...ListSandboxesV2Opt
 	}
 	if p.nextToken != "" {
 		q.Set("nextToken", p.nextToken)
+	}
+	if p.order != "" {
+		q.Set("order", p.order)
+	}
+	if !p.startedAfter.IsZero() {
+		q.Set("startedAfter", p.startedAfter.UTC().Format(time.RFC3339))
+	}
+	if p.template != "" {
+		q.Set("template", p.template)
 	}
 
 	baseURL.RawQuery = q.Encode()

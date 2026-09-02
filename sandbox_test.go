@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewSandboxSuccess(t *testing.T) {
@@ -1805,6 +1806,194 @@ func TestClientListSandboxesV2CanceledContext(t *testing.T) {
 	_, err = client.ListSandboxesV2(ctx)
 	if err == nil {
 		t.Fatal("expected error for canceled context")
+	}
+}
+
+func newListV2QueryClient(t *testing.T, inspect func(*http.Request)) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inspect(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := NewClient(ClientConfig{APIKey: "test-key", APIBaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return client
+}
+
+func TestClientListSandboxesV2OrderAsc(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if got := r.URL.Query().Get("order"); got != OrderAsc {
+			t.Errorf("order = %q, want %q", got, OrderAsc)
+		}
+		if n := strings.Count(r.URL.RawQuery, "order="); n != 1 {
+			t.Errorf("found %d order= keys in raw query %q, want 1", n, r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxOrder(OrderAsc)); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2OrderDesc(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if got := r.URL.Query().Get("order"); got != OrderDesc {
+			t.Errorf("order = %q, want %q", got, OrderDesc)
+		}
+		if n := strings.Count(r.URL.RawQuery, "order="); n != 1 {
+			t.Errorf("found %d order= keys in raw query %q, want 1", n, r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxOrder(OrderDesc)); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2OrderOmitted(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if _, ok := r.URL.Query()["order"]; ok {
+			t.Errorf("order query key present, want omitted: %s", r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background()); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2StartedAfter(t *testing.T) {
+	after := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if got := r.URL.Query().Get("startedAfter"); got != "2025-01-01T00:00:00Z" {
+			t.Errorf("startedAfter = %q, want %q", got, "2025-01-01T00:00:00Z")
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxStartedAfter(after)); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2StartedAfterNonUTC(t *testing.T) {
+	loc := time.FixedZone("EST", -5*60*60)
+	after := time.Date(2024, 12, 31, 19, 0, 0, 0, loc) // 2025-01-01T00:00:00Z
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if got := r.URL.Query().Get("startedAfter"); got != "2025-01-01T00:00:00Z" {
+			t.Errorf("startedAfter = %q, want %q", got, "2025-01-01T00:00:00Z")
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxStartedAfter(after)); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2StartedAfterZero(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if _, ok := r.URL.Query()["startedAfter"]; ok {
+			t.Errorf("startedAfter query key present, want omitted: %s", r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxStartedAfter(time.Time{})); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2Template(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if got := r.URL.Query().Get("template"); got != "base" {
+			t.Errorf("template = %q, want %q", got, "base")
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxTemplate("base")); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2TemplateEmpty(t *testing.T) {
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		if _, ok := r.URL.Query()["template"]; ok {
+			t.Errorf("template query key present, want omitted: %s", r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(), WithSandboxTemplate("")); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2NewFiltersCombined(t *testing.T) {
+	after := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("order"); got != OrderAsc {
+			t.Errorf("order = %q, want %q", got, OrderAsc)
+		}
+		if got := q.Get("startedAfter"); got != "2025-01-01T00:00:00Z" {
+			t.Errorf("startedAfter = %q, want %q", got, "2025-01-01T00:00:00Z")
+		}
+		if got := q.Get("template"); got != "base" {
+			t.Errorf("template = %q, want %q", got, "base")
+		}
+		if got := q.Get("state"); got != "running,paused" {
+			t.Errorf("state = %q, want %q", got, "running,paused")
+		}
+		if got := q.Get("limit"); got != "20" {
+			t.Errorf("limit = %q, want %q", got, "20")
+		}
+		if got := q.Get("metadata"); got != "env=dev" {
+			t.Errorf("metadata = %q, want %q", got, "env=dev")
+		}
+		if n := strings.Count(r.URL.RawQuery, "state="); n != 1 {
+			t.Errorf("found %d state= keys, want 1", n)
+		}
+		if n := strings.Count(r.URL.RawQuery, "metadata="); n != 1 {
+			t.Errorf("found %d metadata= keys, want 1", n)
+		}
+		if n := strings.Count(r.URL.RawQuery, "order="); n != 1 {
+			t.Errorf("found %d order= keys, want 1", n)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(),
+		WithSandboxState("running", "paused"),
+		WithSandboxMetadata(map[string]string{"env": "dev"}),
+		WithSandboxTemplate("base"),
+		WithSandboxStartedAfter(after),
+		WithSandboxOrder(OrderAsc),
+		WithSandboxLimit(20),
+	); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
+	}
+}
+
+func TestClientListSandboxesV2NewFiltersURLEncoding(t *testing.T) {
+	after := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := newListV2QueryClient(t, func(r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("template"); got != "foo/bar+baz" {
+			t.Errorf("template = %q, want %q", got, "foo/bar+baz")
+		}
+		if got := q.Get("startedAfter"); got != "2025-01-01T00:00:00Z" {
+			t.Errorf("startedAfter = %q, want %q", got, "2025-01-01T00:00:00Z")
+		}
+		if !strings.Contains(r.URL.RawQuery, "startedAfter=") {
+			t.Errorf("raw query missing startedAfter: %s", r.URL.RawQuery)
+		}
+	})
+
+	if _, err := client.ListSandboxesV2(context.Background(),
+		WithSandboxTemplate("foo/bar+baz"),
+		WithSandboxStartedAfter(after),
+	); err != nil {
+		t.Fatalf("ListSandboxesV2: %v", err)
 	}
 }
 

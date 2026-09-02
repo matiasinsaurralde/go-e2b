@@ -4,6 +4,8 @@ package e2b
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -328,4 +330,222 @@ func TestIntegrationListSandboxesV2MultiMetadata(t *testing.T) {
 	}
 
 	t.Log("SUCCESS: Multi-key metadata filter works correctly.")
+}
+
+func listV2RunTag(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func createTaggedSandbox(t *testing.T, client *Client, template, runTag, kind string) *Sandbox {
+	t.Helper()
+	sbx, err := client.NewSandbox(context.Background(), SandboxConfig{
+		Template: template,
+		Timeout:  180,
+		Metadata: map[string]string{"suite": runTag, "kind": kind},
+	})
+	if err != nil {
+		t.Fatalf("NewSandbox(%s): %v", kind, err)
+	}
+	t.Cleanup(func() { _ = sbx.Close() })
+	t.Logf("Created sandbox %s kind=%s", sbx.ID, kind)
+	return sbx
+}
+
+func idsInOrder(result *ListSandboxesV2Result) []string {
+	ids := make([]string, 0, len(result.Sandboxes))
+	for _, s := range result.Sandboxes {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+func findSandboxIndex(result *ListSandboxesV2Result, id string) int {
+	for i, s := range result.Sandboxes {
+		if s.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestIntegrationListSandboxesV2Order verifies sort order across the matching set.
+func TestIntegrationListSandboxesV2Order(t *testing.T) {
+	client := listV2IntegrationClient(t)
+	ctx := context.Background()
+	tmpl := listV2Template(t)
+	runTag := listV2RunTag("go-e2b-list-order")
+
+	a := createTaggedSandbox(t, client, tmpl, runTag, "a")
+	time.Sleep(2 * time.Second)
+	b := createTaggedSandbox(t, client, tmpl, runTag, "b")
+
+	meta := WithSandboxMetadata(map[string]string{"suite": runTag})
+
+	asc, err := client.ListSandboxesV2(ctx, meta, WithSandboxOrder(OrderAsc))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(order=asc): %v", err)
+	}
+	idxA := findSandboxIndex(asc, a.ID)
+	idxB := findSandboxIndex(asc, b.ID)
+	if idxA < 0 || idxB < 0 {
+		t.Fatalf("order=asc missing sandboxes: a=%d b=%d ids=%v", idxA, idxB, idsInOrder(asc))
+	}
+	if idxA >= idxB {
+		t.Errorf("order=asc: expected %s before %s, got %v", a.ID, b.ID, idsInOrder(asc))
+	}
+
+	desc, err := client.ListSandboxesV2(ctx, meta, WithSandboxOrder(OrderDesc))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(order=desc): %v", err)
+	}
+	idxA = findSandboxIndex(desc, a.ID)
+	idxB = findSandboxIndex(desc, b.ID)
+	if idxA < 0 || idxB < 0 {
+		t.Fatalf("order=desc missing sandboxes: a=%d b=%d ids=%v", idxA, idxB, idsInOrder(desc))
+	}
+	if idxB >= idxA {
+		t.Errorf("order=desc: expected %s before %s, got %v", b.ID, a.ID, idsInOrder(desc))
+	}
+
+	def, err := client.ListSandboxesV2(ctx, meta)
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(default order): %v", err)
+	}
+	idxA = findSandboxIndex(def, a.ID)
+	idxB = findSandboxIndex(def, b.ID)
+	if idxA < 0 || idxB < 0 {
+		t.Fatalf("default order missing sandboxes: a=%d b=%d ids=%v", idxA, idxB, idsInOrder(def))
+	}
+	if idxB >= idxA {
+		t.Errorf("default order: expected newest-first (%s before %s), got %v", b.ID, a.ID, idsInOrder(def))
+	}
+}
+
+// TestIntegrationListSandboxesV2Template verifies template ID/alias filtering.
+func TestIntegrationListSandboxesV2Template(t *testing.T) {
+	client := listV2IntegrationClient(t)
+	ctx := context.Background()
+	tmpl := listV2Template(t)
+	runTag := listV2RunTag("go-e2b-list-template")
+
+	sbx := createTaggedSandbox(t, client, tmpl, runTag, "tmpl")
+	meta := WithSandboxMetadata(map[string]string{"suite": runTag})
+
+	matched, err := client.ListSandboxesV2(ctx, meta, WithSandboxTemplate(tmpl))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(template=%s): %v", tmpl, err)
+	}
+	if findSandboxIndex(matched, sbx.ID) < 0 {
+		t.Errorf("sandbox %s not found with template=%s; ids=%v", sbx.ID, tmpl, idsInOrder(matched))
+	}
+
+	missing, err := client.ListSandboxesV2(ctx, meta, WithSandboxTemplate("this-template-does-not-exist-"+runTag))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(unknown template): %v", err)
+	}
+	if len(missing.Sandboxes) != 0 {
+		t.Errorf("unknown template returned %d sandboxes, want 0: %v", len(missing.Sandboxes), idsInOrder(missing))
+	}
+}
+
+// TestIntegrationListSandboxesV2StartedAfter verifies the inclusive startedAt lower bound.
+func TestIntegrationListSandboxesV2StartedAfter(t *testing.T) {
+	client := listV2IntegrationClient(t)
+	ctx := context.Background()
+	tmpl := listV2Template(t)
+	runTag := listV2RunTag("go-e2b-list-started")
+
+	t0 := time.Now().UTC().Add(-time.Second)
+	sbx := createTaggedSandbox(t, client, tmpl, runTag, "started")
+	meta := WithSandboxMetadata(map[string]string{"suite": runTag})
+
+	present, err := client.ListSandboxesV2(ctx, meta, WithSandboxStartedAfter(t0))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(startedAfter=t0): %v", err)
+	}
+	if findSandboxIndex(present, sbx.ID) < 0 {
+		t.Errorf("sandbox %s not found with startedAfter=%s; ids=%v", sbx.ID, t0.Format(time.RFC3339), idsInOrder(present))
+	}
+
+	future := time.Now().Add(time.Hour)
+	absent, err := client.ListSandboxesV2(ctx, meta, WithSandboxStartedAfter(future))
+	if err != nil {
+		t.Fatalf("ListSandboxesV2(startedAfter=future): %v", err)
+	}
+	if len(absent.Sandboxes) != 0 {
+		t.Errorf("future startedAfter returned %d sandboxes, want 0: %v", len(absent.Sandboxes), idsInOrder(absent))
+	}
+}
+
+// TestIntegrationListSandboxesV2NewFiltersWithPagination pages through a tagged
+// set with order=asc and limit=1, re-passing the same filters on every page.
+func TestIntegrationListSandboxesV2NewFiltersWithPagination(t *testing.T) {
+	client := listV2IntegrationClient(t)
+	ctx := context.Background()
+	tmpl := listV2Template(t)
+	runTag := listV2RunTag("go-e2b-list-pages")
+
+	a := createTaggedSandbox(t, client, tmpl, runTag, "a")
+	time.Sleep(2 * time.Second)
+	b := createTaggedSandbox(t, client, tmpl, runTag, "b")
+	time.Sleep(2 * time.Second)
+	c := createTaggedSandbox(t, client, tmpl, runTag, "c")
+	want := []string{a.ID, b.ID, c.ID}
+
+	meta := map[string]string{"suite": runTag}
+	var got []string
+	seen := make(map[string]bool)
+	token := ""
+	for i := 0; i < 10; i++ {
+		opts := []ListSandboxesV2Option{
+			WithSandboxMetadata(meta),
+			WithSandboxOrder(OrderAsc),
+			WithSandboxLimit(1),
+		}
+		if token != "" {
+			opts = append(opts, WithSandboxNextToken(token))
+		}
+		page, err := client.ListSandboxesV2(ctx, opts...)
+		if err != nil {
+			t.Fatalf("ListSandboxesV2 page %d: %v", i, err)
+		}
+		for _, s := range page.Sandboxes {
+			if seen[s.ID] {
+				t.Errorf("duplicate sandbox %s across pages", s.ID)
+			}
+			seen[s.ID] = true
+			got = append(got, s.ID)
+		}
+		token = page.NextToken
+		if token == "" {
+			break
+		}
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("paged %d sandboxes, want 3: %v", len(got), got)
+	}
+	for i, id := range want {
+		if got[i] != id {
+			t.Errorf("page order[%d] = %s, want %s (got %v)", i, got[i], id, got)
+		}
+	}
+}
+
+// TestIntegrationListSandboxesV2InvalidOrder confirms the server, not the client,
+// rejects unknown order values.
+func TestIntegrationListSandboxesV2InvalidOrder(t *testing.T) {
+	client := listV2IntegrationClient(t)
+
+	_, err := client.ListSandboxesV2(context.Background(), WithSandboxOrder("sideways"))
+	if err == nil {
+		t.Fatal("expected error for invalid order")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 (%v)", apiErr.StatusCode, err)
+	}
 }

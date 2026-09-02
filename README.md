@@ -98,6 +98,41 @@ sandbox, err := client.NewSandbox(context.Background(), e2b.SandboxConfig{
 
 The `base` template includes Python 3.11, Node.js 20, npm, Yarn, git, and the GitHub CLI.
 
+### Listing Sandboxes
+
+`ListSandboxesV2` returns running and paused sandboxes. Filter by state,
+metadata, template, or start time; sort with `order`; page with `limit` /
+`nextToken`. Callers must re-pass the same filters on every page.
+
+```go
+result, err := client.ListSandboxesV2(ctx,
+    e2b.WithSandboxState("running", "paused"),
+    e2b.WithSandboxTemplate("base"),
+    e2b.WithSandboxStartedAfter(time.Now().Add(-24*time.Hour)),
+    e2b.WithSandboxOrder(e2b.OrderDesc),
+    e2b.WithSandboxLimit(20),
+)
+if err != nil {
+    log.Fatal(err)
+}
+for _, s := range result.Sandboxes {
+    fmt.Println(s.ID, s.State, s.StartedAt)
+}
+for result.NextToken != "" {
+    result, err = client.ListSandboxesV2(ctx,
+        e2b.WithSandboxState("running", "paused"),
+        e2b.WithSandboxTemplate("base"),
+        e2b.WithSandboxStartedAfter(time.Now().Add(-24*time.Hour)),
+        e2b.WithSandboxOrder(e2b.OrderDesc),
+        e2b.WithSandboxLimit(20),
+        e2b.WithSandboxNextToken(result.NextToken),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
 ### Running Commands
 
 `Run` takes a `context.Context` and a single shell command string, executed
